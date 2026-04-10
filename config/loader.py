@@ -67,6 +67,14 @@ class Settings:
     request_timeout: int
     token_retry_count: int
     token_retry_delay: int
+    request_retry_count: int       # GET 재시도 횟수 (POST는 재시도 없음)
+    request_retry_delay: int       # GET 재시도 기본 간격 (초)
+
+    # KIS 레이트리밋 (모드별)
+    kis_rate_limit_interval: float  # 호출 사이 최소 간격 (초)
+
+    # HTTP
+    http_user_agent: str
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -183,6 +191,55 @@ def load_settings() -> Settings:
     token_retry_delay = int(
         _get_nested(yaml_data, "network", "token_retry_delay")
     )
+    request_retry_count = int(
+        _get_nested(yaml_data, "network", "request_retry_count")
+    )
+    request_retry_delay = int(
+        _get_nested(yaml_data, "network", "request_retry_delay")
+    )
+
+    # 9-1. 네트워크 값 검증
+    if request_timeout <= 0:
+        raise SettingsError(
+            f"network.request_timeout는 양수여야 합니다: {request_timeout}"
+        )
+    if token_retry_count < 1:
+        raise SettingsError(
+            f"network.token_retry_count는 1 이상이어야 합니다: "
+            f"{token_retry_count}"
+        )
+    if token_retry_delay < 0:
+        raise SettingsError(
+            f"network.token_retry_delay는 0 이상이어야 합니다: "
+            f"{token_retry_delay}"
+        )
+    if request_retry_count < 1:
+        raise SettingsError(
+            f"network.request_retry_count는 1 이상이어야 합니다: "
+            f"{request_retry_count}"
+        )
+    if request_retry_delay < 0:
+        raise SettingsError(
+            f"network.request_retry_delay는 0 이상이어야 합니다: "
+            f"{request_retry_delay}"
+        )
+
+    # 10. KIS 레이트리밋 (mode별)
+    rate_limit_interval = float(
+        _get_nested(yaml_data, "kis", mode, "rate_limit_interval")
+    )
+    if rate_limit_interval < 0:
+        raise SettingsError(
+            f"kis.{mode}.rate_limit_interval는 0 이상이어야 합니다: "
+            f"{rate_limit_interval}"
+        )
+
+    # 11. HTTP
+    http_user_agent = str(
+        _get_nested(yaml_data, "http", "user_agent")
+    ).strip()
+    if not http_user_agent:
+        raise SettingsError("http.user_agent는 비어있을 수 없습니다.")
 
     return Settings(
         mode=mode,
@@ -200,6 +257,10 @@ def load_settings() -> Settings:
         request_timeout=request_timeout,
         token_retry_count=token_retry_count,
         token_retry_delay=token_retry_delay,
+        request_retry_count=request_retry_count,
+        request_retry_delay=request_retry_delay,
+        kis_rate_limit_interval=rate_limit_interval,
+        http_user_agent=http_user_agent,
     )
 
 

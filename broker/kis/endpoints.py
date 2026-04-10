@@ -26,3 +26,11 @@ PATH_TOKEN_REVOKE = "/oauth2/revokeP"
 # ============================================
 # PATH_INQUIRE_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
 # TR_ID_INQUIRE_PRICE = "FHKST01010100"
+
+# ============================================
+# 시세 (Phase 1-A에서 사용)
+# ============================================
+
+# 주식 현재가 시세
+PATH_INQUIRE_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
+TR_ID_INQUIRE_PRICE = "FHKST01010100"

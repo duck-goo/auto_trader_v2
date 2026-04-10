@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+import threading
 
 import pytz
 import requests
@@ -37,14 +38,9 @@ from broker.base import BrokerInterface
 from broker.kis.endpoints import PATH_TOKEN_ISSUE
 from config.loader import Settings
 from logger import get_logger
-
+from broker.kis.errors import KisAuthError
 
 KST = pytz.timezone("Asia/Seoul")
-
-
-class KisAuthError(Exception):
-    """KIS 인증 실패."""
-
 
 @dataclass
 class TokenInfo:
@@ -94,6 +90,11 @@ class KisAuth(BrokerInterface):
         )
         self._log_login = get_logger("login")
         self._log_error = get_logger("error")
+        # 동시성 보호: 여러 스레드가 동시에 토큰 발급 요청 시
+        # KIS 1분 1회 제한을 위반하지 않도록 직렬화한다.
+        # RLock 사용 이유: get_access_token → force_refresh 같은
+        # 내부 재진입 가능성을 대비 (현재는 없지만 방어적).
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------
     # Public API
@@ -108,50 +109,55 @@ class KisAuth(BrokerInterface):
             2. 파일 캐시 확인
             3. KIS API 신규 발급
 
+        Thread-safe: 동시 호출 시 락으로 직렬화.
+
         Returns:
             access_token 문자열
 
         Raises:
             KisAuthError: 모든 경로에서 실패
         """
-        # 1. 메모리 캐시
-        if self._memory_cache and self._is_valid(self._memory_cache):
-            return self._memory_cache.access_token
+        with self._lock:
+            # 1. 메모리 캐시
+            if self._memory_cache and self._is_valid(self._memory_cache):
+                return self._memory_cache.access_token
 
-        # 2. 파일 캐시
-        file_token = self._load_from_file()
-        if file_token and self._is_valid(file_token):
-            self._memory_cache = file_token
+            # 2. 파일 캐시
+            file_token = self._load_from_file()
+            if file_token and self._is_valid(file_token):
+                self._memory_cache = file_token
+                self._log_login.info(
+                    f"파일 캐시에서 토큰 로드 "
+                    f"(만료: {file_token.expires_at.isoformat()})"
+                )
+                return file_token.access_token
+
+            # 3. 신규 발급
+            self._log_login.info("토큰 신규 발급 시도")
+            new_token = self._issue_new_token()
+            self._memory_cache = new_token
+            self._save_to_file(new_token)
             self._log_login.info(
-                f"파일 캐시에서 토큰 로드 "
-                f"(만료: {file_token.expires_at.isoformat()})"
+                f"토큰 발급 성공 "
+                f"(만료: {new_token.expires_at.isoformat()})"
             )
-            return file_token.access_token
-
-        # 3. 신규 발급
-        self._log_login.info("토큰 신규 발급 시도")
-        new_token = self._issue_new_token()
-        self._memory_cache = new_token
-        self._save_to_file(new_token)
-        self._log_login.info(
-            f"토큰 발급 성공 "
-            f"(만료: {new_token.expires_at.isoformat()})"
-        )
-        return new_token.access_token
+            return new_token.access_token
 
     def force_refresh(self) -> str:
         """
         캐시 무시하고 강제 재발급.
 
         주의: 빈번 호출 시 KIS 정책(1분 1회) 위반 가능.
-        운영 중에는 사용 금지. 디버깅/복구 용도만.
+        운영 중에는 사용 금지. 디버깅/복구 또는
+        토큰 만료 응답을 받았을 때 client.py가 1회 호출.
         """
-        self._log_login.warning("토큰 강제 재발급 요청")
-        self._memory_cache = None
-        new_token = self._issue_new_token()
-        self._memory_cache = new_token
-        self._save_to_file(new_token)
-        return new_token.access_token
+        with self._lock:
+            self._log_login.warning("토큰 강제 재발급 요청")
+            self._memory_cache = None
+            new_token = self._issue_new_token()
+            self._memory_cache = new_token
+            self._save_to_file(new_token)
+            return new_token.access_token
 
     # ------------------------------------------------------------
     # 내부 로직
