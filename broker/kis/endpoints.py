@@ -34,3 +34,19 @@ PATH_TOKEN_REVOKE = "/oauth2/revokeP"
 # 주식 현재가 시세
 PATH_INQUIRE_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
 TR_ID_INQUIRE_PRICE = "FHKST01010100"
+
+# 일봉 (inquire-daily-itemchartprice)
+PATH_INQUIRE_DAILY = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+TR_ID_INQUIRE_DAILY = "FHKST03010100"
+
+# 분봉 (inquire-time-itemchartprice) - 1분봉만 지원
+PATH_INQUIRE_MINUTE = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+TR_ID_INQUIRE_MINUTE = "FHKST03010200"
+
+# ============================================
+# 계좌 (Phase 1-A)
+# ============================================
+
+# 주식 잔고 조회
+PATH_INQUIRE_BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
+TR_ID_INQUIRE_BALANCE = "TTTC8434R"  # 모의는 자동 VTTC8434R 변환

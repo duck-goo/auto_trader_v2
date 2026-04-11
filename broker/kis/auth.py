@@ -34,7 +34,6 @@ import threading
 import pytz
 import requests
 
-from broker.base import BrokerInterface
 from broker.kis.endpoints import PATH_TOKEN_ISSUE
 from config.loader import Settings
 from logger import get_logger
@@ -74,7 +73,7 @@ class TokenInfo:
         )
 
 
-class KisAuth(BrokerInterface):
+class KisAuth:
     """
     KIS 토큰 관리.
 

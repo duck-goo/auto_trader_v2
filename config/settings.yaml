@@ -31,7 +31,7 @@ token:
 # 로깅
 logging:
   # DEBUG / INFO / WARNING / ERROR
-  level: INFO
+  level: DEBUG
   # 로그 파일 저장 경로
   log_dir: "logs"
   # 콘솔 출력 여부
@@ -44,9 +44,9 @@ network:
   # HTTP 요청 타임아웃 (초)
   request_timeout: 10
   # 토큰 발급 실패 시 최대 재시도 횟수
-  token_retry_count: 3
+  token_retry_count: 4
   # 토큰 발급 재시도 간격 (초)
-  token_retry_delay: 5
+  token_retry_delay: 2
   # 일반 API GET 호출 재시도 (POST는 절대 재시도 안 함)
   request_retry_count: 2
   # 재시도 간격 (초). 실제 대기 = delay * attempt (지수 백오프)

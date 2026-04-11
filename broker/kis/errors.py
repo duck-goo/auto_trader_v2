@@ -101,3 +101,13 @@ class KisRateLimitError(KisError):
 # 향후 운영 중 특정 msg_cd로 만료가 실측되면 보조 안전망으로 여기에
 # 추가하고, client.py에서 1회 강제 재발급 후 재시도하는 로직을 켠다.
 TOKEN_EXPIRED_MSG_CODES: frozenset[str] = frozenset()
+
+# ============================================================
+# 레이트리밋 메시지 코드 (재시도 대상)
+# ============================================================
+# KIS가 초당 거래건수 초과 시 반환하는 코드.
+# 실측 확인됨 (2026-04-11 Step 2-7-B 검증 중).
+#
+# HTTP 500 + rt_cd=1 + msg_cd=EGW00201 형태로 온다.
+# _execute_get에서 이 코드를 만나면 잠시 대기 후 재시도한다.
+RATE_LIMIT_MSG_CODES: frozenset[str] = frozenset({"EGW00201"})
