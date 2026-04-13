@@ -76,6 +76,9 @@ class Settings:
     # HTTP
     http_user_agent: str
 
+    # DB
+    db_path: str = "./data/trading.db"
+
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     """YAML 파일 로드. 파일 없거나 파싱 실패 시 SettingsError."""
@@ -241,6 +244,18 @@ def load_settings() -> Settings:
     if not http_user_agent:
         raise SettingsError("http.user_agent는 비어있을 수 없습니다.")
 
+    # 12. DB (env override 우선, 없으면 yaml, 둘 다 없으면 기본값)
+    env_db_path = os.getenv("DB_PATH", "").strip()
+    if env_db_path:
+        db_path = env_db_path
+    else:
+        db_section = yaml_data.get("db", {})
+        if not isinstance(db_section, dict):
+            raise SettingsError("settings.yaml의 'db' 섹션이 dict가 아닙니다.")
+        db_path = str(db_section.get("path", "./data/trading.db")).strip()
+    if not db_path:
+        raise SettingsError("db.path가 비어있습니다.")
+
     return Settings(
         mode=mode,
         kis_app_key=app_key,
@@ -261,6 +276,7 @@ def load_settings() -> Settings:
         request_retry_delay=request_retry_delay,
         kis_rate_limit_interval=rate_limit_interval,
         http_user_agent=http_user_agent,
+        db_path=db_path,
     )
 
 
