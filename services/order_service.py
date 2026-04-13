@@ -41,6 +41,7 @@ from services.errors import (
 )
 from storage.db import transaction
 from storage.repositories import (
+    DbOrderStatus,
     OrderRepository,
     OrderRow,
     PositionRepository,
@@ -60,6 +61,13 @@ ERR_INSUFFICIENT_POSITION = "PRE_TRADE_INSUFFICIENT_POSITION"
 ERR_UNKNOWN_NO_ORDER_NO = "BROKER_ACCEPTED_WITHOUT_ORDER_NO"
 ERR_UNKNOWN_NETWORK = "BROKER_CALL_NETWORK_OR_ORDER_ERROR"
 ERR_UNKNOWN_GENERIC = "BROKER_CALL_UNEXPECTED_KIS_ERROR"
+ERR_CANCEL_ORDER_NOT_FOUND = "CANCEL_ORDER_NOT_FOUND"
+ERR_CANCEL_NOT_ALLOWED_STATUS = "CANCEL_NOT_ALLOWED_STATUS"
+ERR_CANCEL_MISSING_ORDER_NO = "CANCEL_MISSING_ORDER_NO"
+ERR_CANCEL_BROKER_REJECTED = "CANCEL_BROKER_REJECTED"
+ERR_CANCEL_UNKNOWN_NETWORK = "CANCEL_BROKER_CALL_NETWORK_OR_ORDER_ERROR"
+ERR_CANCEL_UNKNOWN_GENERIC = "CANCEL_BROKER_CALL_UNEXPECTED_KIS_ERROR"
+
 
 
 class OrderOutcome(str, enum.Enum):
@@ -77,6 +85,23 @@ class OrderResult:
     broker_info: OrderInfo | None
     error_code: str | None
     error_message: str | None
+
+class CancelOutcome(str, enum.Enum):
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+    BLOCKED = "BLOCKED"
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    outcome: CancelOutcome
+    client_order_id: str
+    order_row: OrderRow | None
+    broker_info: OrderInfo | None
+    error_code: str | None
+    error_message: str | None
+
 
 
 def _default_now() -> datetime:
@@ -253,6 +278,152 @@ class OrderService:
             error_code=None,
             error_message=None,
         )
+    
+    def cancel_order(self, *, client_order_id: str) -> CancelResult:
+        """
+        Cancel a previously submitted order by our client_order_id.
+
+        Normal business outcomes are returned as CancelResult.
+        Unexpected non-KIS exceptions propagate unchanged.
+        """
+        if not isinstance(client_order_id, str) or not client_order_id.strip():
+            raise ValueError(
+                f"client_order_id must be a non-empty string: {client_order_id!r}"
+            )
+        client_order_id = client_order_id.strip()
+
+        current = self._order_repo.get_by_client_order_id(client_order_id)
+        if current is None:
+            error_code = ERR_CANCEL_ORDER_NOT_FOUND
+            error_message = (
+                "Order not found for cancellation: "
+                f"client_order_id={client_order_id}"
+            )
+            _log.warning(
+                f"[cancel_order:blocked_not_found] client_order_id={client_order_id}"
+            )
+            return CancelResult(
+                outcome=CancelOutcome.BLOCKED,
+                client_order_id=client_order_id,
+                order_row=None,
+                broker_info=None,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+        if current.status not in (DbOrderStatus.SUBMITTED, DbOrderStatus.PARTIAL):
+            error_code = ERR_CANCEL_NOT_ALLOWED_STATUS
+            error_message = (
+                "Order is not cancellable in current status: "
+                f"client_order_id={client_order_id} "
+                f"status={current.status.value}"
+            )
+            _log.warning(
+                f"[cancel_order:blocked_status] client_order_id={client_order_id} "
+                f"status={current.status.value}"
+            )
+            return CancelResult(
+                outcome=CancelOutcome.BLOCKED,
+                client_order_id=client_order_id,
+                order_row=current,
+                broker_info=None,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+        order_no = (current.kis_order_no or "").strip()
+        if not order_no:
+            error_code = ERR_CANCEL_MISSING_ORDER_NO
+            error_message = (
+                "Order has no kis_order_no, so broker cancellation is impossible: "
+                f"client_order_id={client_order_id}"
+            )
+            _log.warning(
+                f"[cancel_order:blocked_missing_order_no] "
+                f"client_order_id={client_order_id}"
+            )
+            return CancelResult(
+                outcome=CancelOutcome.BLOCKED,
+                client_order_id=client_order_id,
+                order_row=current,
+                broker_info=None,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+        broker_info: OrderInfo | None = None
+        try:
+            broker_info = self._broker.cancel_order(
+                order_no=order_no,
+                code=current.symbol,
+                quantity=current.qty,
+            )
+        except KisApiError as exc:
+            error_code, error_message = self._extract_api_error_info(exc)
+            error_code = error_code or ERR_CANCEL_BROKER_REJECTED
+            _log.warning(
+                f"[cancel_order:rejected] client_order_id={client_order_id} "
+                f"kis_order_no={order_no} error_code={error_code} "
+                f"error_message={error_message}"
+            )
+            return CancelResult(
+                outcome=CancelOutcome.REJECTED,
+                client_order_id=client_order_id,
+                order_row=self._get_order_row_or_raise(client_order_id),
+                broker_info=None,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        except KisOrderError as exc:
+            _log.warning(
+                f"[cancel_order:unknown_order_error] "
+                f"client_order_id={client_order_id} kis_order_no={order_no} "
+                f"error={exc}"
+            )
+            return CancelResult(
+                outcome=CancelOutcome.UNKNOWN,
+                client_order_id=client_order_id,
+                order_row=self._get_order_row_or_raise(client_order_id),
+                broker_info=exc.order_info,
+                error_code=ERR_CANCEL_UNKNOWN_NETWORK,
+                error_message=str(exc),
+            )
+        except KisError as exc:
+            _log.warning(
+                f"[cancel_order:unknown_kis_error] "
+                f"client_order_id={client_order_id} kis_order_no={order_no} "
+                f"error={exc}"
+            )
+            return CancelResult(
+                outcome=CancelOutcome.UNKNOWN,
+                client_order_id=client_order_id,
+                order_row=self._get_order_row_or_raise(client_order_id),
+                broker_info=None,
+                error_code=ERR_CANCEL_UNKNOWN_GENERIC,
+                error_message=str(exc),
+            )
+
+        closed_at_iso = self._now_fn().isoformat()
+        with transaction(self._conn):
+            row = self._order_repo.mark_cancelled(
+                client_order_id=client_order_id,
+                closed_at=closed_at_iso,
+            )
+
+        _log.info(
+            f"[cancel_order:cancelled] client_order_id={client_order_id} "
+            f"kis_order_no={order_no} cancel_order_no="
+            f"{getattr(broker_info, 'order_no', None)}"
+        )
+        return CancelResult(
+            outcome=CancelOutcome.CANCELLED,
+            client_order_id=client_order_id,
+            order_row=row,
+            broker_info=broker_info,
+            error_code=None,
+            error_message=None,
+        )
+    
 
     # ------------------------------------------------------------------
     # Pre-trade validation
@@ -368,6 +539,16 @@ class OrderService:
         else:
             error_code = None
         return error_code, error_message
+    
+    def _get_order_row_or_raise(self, client_order_id: str) -> OrderRow:
+        row = self._order_repo.get_by_client_order_id(client_order_id)
+        if row is None:
+            raise ServiceError(
+                f"Order row disappeared unexpectedly: "
+                f"client_order_id={client_order_id!r}"
+            )
+        return row
+    
 
     # ------------------------------------------------------------------
     # Internal: pending-order creation with UNIQUE retry

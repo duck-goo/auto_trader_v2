@@ -6,12 +6,16 @@ from services.errors import (
     ServiceError,
 )
 from services.order_service import (
+    CancelOutcome,
+    CancelResult,
     OrderOutcome,
     OrderResult,
     OrderService,
 )
 
 __all__ = [
+    "CancelOutcome",
+    "CancelResult",
     "DuplicateClientOrderIdError",
     "InsufficientPositionError",
     "OrderOutcome",
