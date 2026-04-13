@@ -111,3 +111,25 @@ TOKEN_EXPIRED_MSG_CODES: frozenset[str] = frozenset()
 # HTTP 500 + rt_cd=1 + msg_cd=EGW00201 형태로 온다.
 # _execute_get에서 이 코드를 만나면 잠시 대기 후 재시도한다.
 RATE_LIMIT_MSG_CODES: frozenset[str] = frozenset({"EGW00201"})
+
+class KisOrderError(KisError):
+    """
+    주문 레이어 전용 예외.
+
+    KisApiError와 구분하는 이유:
+        KisApiError: KIS 서버가 명시적으로 실패 응답을 돌려준 경우
+        KisOrderError: 주문 모듈의 비즈니스 규칙 위반
+                       (중복 주문, UNKNOWN 상태 재시도 시도 등)
+
+    Attributes:
+        order_info: 실패 시점의 OrderInfo 스냅샷 (있으면)
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        order_info: "OrderInfo | None" = None,
+    ) -> None:
+        super().__init__(message)
+        self.order_info = order_info

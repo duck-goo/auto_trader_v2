@@ -50,3 +50,28 @@ TR_ID_INQUIRE_MINUTE = "FHKST03010200"
 # 주식 잔고 조회
 PATH_INQUIRE_BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 TR_ID_INQUIRE_BALANCE = "TTTC8434R"  # 모의는 자동 VTTC8434R 변환
+
+# ============================================
+# 주문 (Phase 1-B)
+# ============================================
+
+# 현금 매수/매도 (TR_ID로 매수/매도 구분)
+PATH_ORDER_CASH = "/uapi/domestic-stock/v1/trading/order-cash"
+TR_ID_BUY  = "TTTC0802U"  # 매수 (모의: VTTC0802U 자동변환)
+TR_ID_SELL = "TTTC0801U"  # 매도 (모의: VTTC0801U 자동변환)
+
+# 주문 취소/정정
+PATH_ORDER_RVSECNCL = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
+TR_ID_CANCEL = "TTTC0803U"  # 취소 (모의: VTTC0803U 자동변환)
+
+# 미체결 주문 조회 (취소 가능 목록)
+PATH_INQUIRE_PSBL_RVSECNCL = (
+    "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl"
+)
+TR_ID_INQUIRE_PSBL_RVSECNCL = "TTTC8036R"  # 모의: VTTC8036R 자동변환
+
+# 당일 체결 내역 조회
+PATH_INQUIRE_DAILY_CCLD = (
+    "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+)
+TR_ID_INQUIRE_DAILY_CCLD = "TTTC8001R"  # 모의: VTTC8001R 자동변환

@@ -1,11 +1,8 @@
 """
 브로커 추상 인터페이스.
 
-향후 KIS 외 다른 증권사(키움, 넥스트레이드 등) 확장 시
-이 인터페이스를 구현하면 된다.
-
 Phase 1-A: 조회(read-only) 메서드 4개
-Phase 1-B: 주문 메서드 3개 (place_order, cancel_order, get_order_status)
+Phase 1-B: 주문 메서드 3개 추가
 """
 
 from __future__ import annotations
@@ -15,42 +12,17 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pandas as pd
-    from broker.kis.models import Balance, PriceSnapshot
+    from broker.kis.models import Balance, OrderInfo, PriceSnapshot
 
 
 class BrokerInterface(ABC):
-    """
-    모든 브로커 구현체가 따라야 할 인터페이스.
-
-    Phase 1-A에서 구현된 메서드:
-        - get_access_token()         인증 (Phase 0)
-        - get_current_price(code)    현재가
-        - get_daily_candles(...)     일봉
-        - get_minute_candles(...)    분봉
-        - get_balance()              잔고
-
-    Phase 1-B에서 추가될 메서드:
-        - place_order(...)
-        - cancel_order(...)
-        - get_order_status(...)
-    """
 
     @abstractmethod
     def get_access_token(self) -> str:
-        """유효한 access token 반환. 없거나 만료 시 갱신."""
         raise NotImplementedError
 
     @abstractmethod
     def get_current_price(self, code: str) -> "PriceSnapshot":
-        """
-        주식 현재가 조회.
-
-        Args:
-            code: 6자리 종목코드
-
-        Returns:
-            PriceSnapshot
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -60,14 +32,6 @@ class BrokerInterface(ABC):
         count: int = 30,
         end_date: str | None = None,
     ) -> "pd.DataFrame":
-        """
-        일봉 조회 (과거 → 현재 오름차순).
-
-        Args:
-            code: 6자리 종목코드
-            count: 개수 (1~100)
-            end_date: 기준일 YYYYMMDD (None이면 오늘)
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -76,29 +40,86 @@ class BrokerInterface(ABC):
         code: str,
         interval: str = "1",
     ) -> "pd.DataFrame":
-        """
-        분봉 조회.
-
-        Args:
-            code: 6자리 종목코드
-            interval: "1" (1분봉). 다른 봉은 호출자가 리샘플링.
-        """
         raise NotImplementedError
 
     @abstractmethod
     def get_balance(self) -> "Balance":
+        raise NotImplementedError
+
+    # ============================================================
+    # Phase 1-B: 주문 메서드
+    # ============================================================
+
+    @abstractmethod
+    def place_order(
+        self,
+        code: str,
+        side: str,
+        quantity: int,
+        price: int = 0,
+    ) -> "OrderInfo":
         """
-        계좌 잔고 + 보유종목 조회.
+        주문 전송.
+
+        Args:
+            code:     6자리 종목코드
+            side:     "buy" | "sell"
+            quantity: 1 이상 정수
+            price:    0=시장가, >0=지정가
 
         Returns:
-            Balance
+            OrderInfo (status=ACCEPTED 또는 UNKNOWN)
+
+        Raises:
+            ValueError:      입력값 형식 오류 (코드, 수량, side)
+            KisOrderError:   중복 주문 감지
+            KisApiError:     KIS 거부 (rt_cd≠0) → status=REJECTED
+            KisApiError:     POST 네트워크 실패 → status=UNKNOWN
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def cancel_order(
+        self,
+        order_no: str,
+        code: str,
+        quantity: int,
+    ) -> "OrderInfo":
+        """
+        주문 전량 취소.
+
+        Args:
+            order_no: KIS 주문번호 (place_order 반환값의 order_no)
+            code:     6자리 종목코드
+            quantity: 취소할 수량 (= 원래 주문 수량)
+
+        Returns:
+            OrderInfo (status=CANCELLED 또는 UNKNOWN)
+
+        Raises:
+            ValueError:    입력값 형식 오류
+            KisApiError:   취소 실패 (이미 체결됨 등)
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_order_status(
+        self,
+        order_no: str | None = None,
+        *,
+        filled_only: bool = False,
+    ) -> "list[OrderInfo]":
+        """
+        주문 상태 조회.
+
+        Args:
+            order_no:    특정 주문번호만 필터 (None이면 전체)
+            filled_only: True=당일 체결 내역, False=미체결 목록
+
+        Returns:
+            OrderInfo 리스트 (없으면 빈 리스트)
         """
         raise NotImplementedError
 
     def close(self) -> None:
-        """
-        리소스 정리. 프로그램 종료 시 호출.
-
-        구현체가 오버라이드. 기본은 no-op.
-        """
         pass

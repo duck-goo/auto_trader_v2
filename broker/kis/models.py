@@ -8,63 +8,63 @@ KIS 응답을 담는 데이터 모델.
     - 시각은 항상 timezone-aware (KST).
     - 캔들 데이터는 DataFrame으로 별도 반환 (이 파일엔 없음).
 
-Step 1에서는 정의만. Step 3/4에서 parsers가 채워서 반환.
+Phase 1-A: PriceSnapshot, Holding, Balance, KisResponse
+Phase 1-B: OrderSide, OrderType, OrderStatus, OrderInfo 추가
 """
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from datetime import datetime
 
 
+# ============================================================
+# Phase 1-A 모델 (변경 없음)
+# ============================================================
+
 @dataclass(frozen=True)
 class PriceSnapshot:
     """현재가 스냅샷."""
-
-    code: str           # 6자리 종목코드
-    name: str           # 종목명 (없으면 빈 문자열)
-    price: int          # 현재가
-    open: int           # 시가
-    high: int           # 고가
-    low: int            # 저가
-    prev_close: int     # 전일 종가
-    change: int         # 전일대비 (음수 가능)
-    change_rate: float  # 등락률 (%, 음수 가능)
-    volume: int         # 누적 거래량
-    timestamp: datetime  # 조회 시각 (KST, tz-aware)
+    code: str
+    name: str
+    price: int
+    open: int
+    high: int
+    low: int
+    prev_close: int
+    change: int
+    change_rate: float
+    volume: int
+    timestamp: datetime
 
 
 @dataclass(frozen=True)
 class Holding:
     """보유 종목 1개."""
-
     code: str
     name: str
-    quantity: int        # 보유 수량
-    available: int       # 매도 가능 수량
-    avg_price: float     # 평균 매입가
-    current_price: int   # 현재가
-    eval_amount: int     # 평가 금액
-    profit: int          # 평가 손익 (음수 가능)
-    profit_rate: float   # 수익률 (%, 음수 가능)
+    quantity: int
+    available: int
+    avg_price: float
+    current_price: int
+    eval_amount: int
+    profit: int
+    profit_rate: float
 
 
 @dataclass(frozen=True)
 class Balance:
     """계좌 잔고 + 보유 종목."""
-
-    cash: int                  # 예수금
-    available_cash: int        # 주문 가능 금액
-    total_eval: int            # 총평가금액 (예수금 + 평가금액)
-    total_profit: int          # 총평가손익
+    cash: int
+    available_cash: int
+    total_eval: int
+    total_profit: int
     holdings: tuple[Holding, ...] = field(default_factory=tuple)
-    has_more_pages: bool = False  # 페이징 잔여 여부 (R11)
-    timestamp: datetime = field(
-        default_factory=lambda: datetime.now()
-    )
+    has_more_pages: bool = False
+    timestamp: datetime = field(default_factory=lambda: datetime.now())
 
     def find(self, code: str) -> Holding | None:
-        """종목코드로 보유 종목 검색. 없으면 None."""
         for h in self.holdings:
             if h.code == code:
                 return h
@@ -72,35 +72,12 @@ class Balance:
 
     @property
     def holding_count(self) -> int:
-        """보유 종목 수."""
         return len(self.holdings)
-    
+
+
 @dataclass(frozen=True)
 class KisResponse:
-    """
-    KisClient가 반환하는 표준 응답 컨테이너.
-
-    parsers 모듈이 이 객체를 받아서 도메인 모델
-    (PriceSnapshot, Balance, DataFrame 등)로 변환한다.
-
-    설계 원칙:
-        - body는 KIS 응답 JSON 본문 그대로 (수정 금지).
-        - frozen이지만 body(dict)의 내용은 mutable이므로
-          호출자(parsers)는 body를 절대 수정하지 않는다.
-        - rt_cd가 "0"이 아닌 응답은 KisClient에서 이미 KisApiError로
-          전환했으므로, 이 객체는 항상 성공 응답만 담는다.
-
-    필드:
-        body: KIS 응답 JSON 본문 전체
-        rt_cd: 항상 "0" (성공 응답만 도달)
-        msg_cd: KIS 메시지 코드 (성공 시에도 정보성 코드 있음)
-        msg: KIS 메시지 본문 (성공 시 "정상 처리" 등)
-        tr_cont: 페이징 토큰 ("F"=다음있음(첫조회) / "M"=다음있음 /
-                              "D"=마지막 / "E"=마지막 / ""=단일조회)
-        tr_id: 실제로 호출된 TR_ID (모의 변환 후 값)
-        http_status: HTTP 상태 코드 (항상 200)
-    """
-
+    """KisClient가 반환하는 표준 응답 컨테이너."""
     body: dict
     rt_cd: str
     msg_cd: str
@@ -111,43 +88,95 @@ class KisResponse:
 
     @property
     def output(self) -> dict | list:
-        """
-        대부분의 KIS 시세/단일조회 응답이 사용하는 'output' 필드.
-
-        없으면 빈 dict 반환 (KeyError 방지).
-        호출자는 어떤 타입(dict/list)이 오는지 TR별로 알고 있어야 한다.
-        """
         return self.body.get("output", {})
 
     @property
     def output1(self) -> dict | list:
-        """
-        잔고 조회 등 복합 응답에서 사용하는 'output1' 필드.
-
-        예: 주식잔고조회는 output1=보유종목 리스트, output2=잔고 요약.
-        """
         return self.body.get("output1", {})
 
     @property
     def output2(self) -> dict | list:
-        """잔고 조회 등 복합 응답에서 사용하는 'output2' 필드."""
         return self.body.get("output2", {})
 
     @property
     def has_more_pages(self) -> bool:
-        """
-        페이징 다음 데이터 존재 여부.
-
-        KIS 페이징 규칙 (response header tr_cont):
-            "F" : 다음 페이지 있음 (첫 조회의 응답)
-            "M" : 다음 페이지 있음 (연속 조회 중)
-            "D" : 마지막 페이지
-            "E" : 마지막 페이지
-            ""  : 단일 조회 (페이징 없음)
-
-        다음 페이지 요청 시 호출자는 request_get(tr_cont="N", ...) 으로
-        호출하면 된다.
-        """
         return self.tr_cont in ("F", "M")
-    
-    
+
+
+# ============================================================
+# Phase 1-B 모델 (신규)
+# ============================================================
+
+class OrderSide(str, enum.Enum):
+    """
+    매수/매도 구분.
+
+    str 상속: "buy" == OrderSide.BUY 비교 가능 (전략 코드 편의).
+    """
+    BUY  = "buy"
+    SELL = "sell"
+
+
+class OrderType(str, enum.Enum):
+    """
+    주문 유형.
+
+    MARKET: 시장가. place_order(price=0) 시 자동 선택.
+    LIMIT:  지정가. place_order(price>0) 시 자동 선택.
+    """
+    MARKET = "market"
+    LIMIT  = "limit"
+
+
+class OrderStatus(str, enum.Enum):
+    """
+    주문 상태.
+
+    상태 전이 다이어그램:
+        PENDING → ACCEPTED  : POST rt_cd=0, 주문번호 수신
+        PENDING → REJECTED  : POST rt_cd≠0 (잔량 부족, 거래시간 외 등)
+        PENDING → UNKNOWN   : POST 네트워크 예외 (재시도 금지)
+        ACCEPTED → FILLED   : 체결 조회로 전량 체결 확인
+        ACCEPTED → PARTIAL  : 체결 조회로 일부 체결 확인
+        ACCEPTED → CANCELLED: 취소 완료 확인
+
+    UNKNOWN 주의:
+        재시도 절대 금지. 호출자가 get_order_status()로
+        실제 접수 여부를 확인한 후 판단해야 한다.
+    """
+    PENDING   = "pending"
+    ACCEPTED  = "accepted"
+    FILLED    = "filled"
+    PARTIAL   = "partial"
+    CANCELLED = "cancelled"
+    REJECTED  = "rejected"
+    UNKNOWN   = "unknown"
+
+
+@dataclass(frozen=True)
+class OrderInfo:
+    """
+    주문 1건의 불변 스냅샷.
+
+    frozen=True 이유:
+        상태가 바뀌면(체결, 취소) 새 OrderInfo를 생성한다.
+        이는 Phase 2 DB의 이벤트 소싱 방식과 일치한다.
+
+    order_no:
+        ACCEPTED 이후에만 값이 있음.
+        PENDING/UNKNOWN/REJECTED 상태에서는 None.
+
+    raw_response:
+        KIS 응답 원본. 디버깅 및 감사 로그용.
+        주문 성공 시 output dict, 실패/네트워크 오류 시 빈 dict.
+    """
+    code: str
+    side: OrderSide
+    order_type: OrderType
+    quantity: int
+    price: int          # 시장가=0, 지정가=실제 가격
+    status: OrderStatus
+    order_no: str | None  # KIS 주문번호. ACCEPTED 이후에만 있음.
+    filled_qty: int     # 체결 수량 (미체결=0)
+    timestamp: datetime  # 주문 시도 시각 (KST)
+    raw_response: dict  # KIS 원본 응답 (감사 로그용)

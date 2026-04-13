@@ -16,7 +16,7 @@ from typing import Any
 import pytz
 
 from broker.kis.errors import KisParseError
-from broker.kis.models import Balance, Holding, KisResponse, PriceSnapshot
+from broker.kis.models import Balance, Holding, KisResponse, PriceSnapshot, OrderInfo, OrderSide, OrderStatus, OrderType
 
 
 KST = pytz.timezone("Asia/Seoul")
@@ -331,3 +331,331 @@ def parse_balance(response: KisResponse) -> Balance:
         has_more_pages=response.has_more_pages,
         timestamp=datetime.now(KST),
     )
+
+# ============================================================
+# Phase 1-B: 주문 파서
+# ============================================================
+
+def _to_order_side(sll_buy_dvsn_cd: str) -> OrderSide:
+    """
+    KIS 매수/매도 구분 코드 → OrderSide.
+
+    KIS 코드:
+        "01" = 매도 (SELL)
+        "02" = 매수 (BUY)
+
+    Raises:
+        KisParseError: 알 수 없는 코드
+    """
+    if sll_buy_dvsn_cd == "02":
+        return OrderSide.BUY
+    if sll_buy_dvsn_cd == "01":
+        return OrderSide.SELL
+    raise KisParseError(
+        f"알 수 없는 sll_buy_dvsn_cd: {sll_buy_dvsn_cd!r} "
+        "(기대값: '01'=매도, '02'=매수)"
+    )
+
+
+def _to_order_type(ord_dvsn_cd: str) -> OrderType:
+    """
+    KIS 주문구분 코드 → OrderType.
+
+    KIS 코드:
+        "00" = 지정가 (LIMIT)
+        "01" = 시장가 (MARKET)
+
+    그 외 코드(최유리, 최우선 등)는 LIMIT으로 통일.
+    운영 중 다른 코드가 나오면 로그로 확인 후 여기에 추가할 것.
+    """
+    if ord_dvsn_cd == "01":
+        return OrderType.MARKET
+    return OrderType.LIMIT  # "00" 및 기타 전부 LIMIT으로 취급
+
+
+def _parse_order_datetime(
+    ord_dt: str,
+    ord_tmd: str,
+) -> datetime:
+    """
+    KIS 주문일(YYYYMMDD) + 주문시각(HHMMSS) → KST datetime.
+
+    ord_dt 또는 ord_tmd가 비어있으면 현재 시각 반환.
+    (POST 응답에는 날짜 없이 시각만 오므로 오늘 날짜 보정.)
+    """
+    today_str = datetime.now(KST).strftime("%Y%m%d")
+    date_str = ord_dt if ord_dt else today_str
+    time_str = ord_tmd.zfill(6) if ord_tmd else "000000"
+
+    try:
+        dt = datetime.strptime(f"{date_str}{time_str}", "%Y%m%d%H%M%S")
+        return KST.localize(dt)
+    except ValueError:
+        # 파싱 실패 시 현재 시각으로 대체 (주문 자체는 성공했으므로 전파 안 함)
+        return datetime.now(KST)
+
+
+def parse_order_response(
+    response: KisResponse,
+    *,
+    code: str,
+    side: OrderSide,
+    order_type: OrderType,
+    quantity: int,
+    price: int,
+    timestamp: datetime,
+) -> OrderInfo:
+    """
+    매수/매도 POST 응답 → OrderInfo(status=ACCEPTED).
+
+    KIS 응답 구조:
+        output.ODNO     : 주문번호
+        output.ORD_TMD  : 주문시각 (HHMMSS)
+
+    Args:
+        response:   KisClient.request_post() 결과 (rt_cd=0 보장)
+        code:       주문한 종목코드 (응답에 없으므로 호출자가 전달)
+        side:       OrderSide (호출자가 전달)
+        order_type: OrderType (호출자가 전달)
+        quantity:   주문수량 (호출자가 전달)
+        price:      주문가격 (호출자가 전달)
+        timestamp:  주문 시도 시각 (호출자가 전달, KST)
+
+    Returns:
+        OrderInfo(status=ACCEPTED, order_no=KIS주문번호)
+
+    Raises:
+        KisParseError: output이 dict가 아니거나 ODNO 누락
+    """
+    output = response.output
+    if not isinstance(output, dict):
+        raise KisParseError(
+            f"주문 응답 output이 dict가 아님: {type(output).__name__}"
+        )
+
+    order_no = str(output.get("ODNO", "")).strip()
+    if not order_no:
+        raise KisParseError(
+            f"주문 응답에 ODNO(주문번호) 없음. "
+            f"output keys={list(output.keys())}"
+        )
+
+    ord_tmd = str(output.get("ORD_TMD", "")).strip()
+    order_dt = _parse_order_datetime("", ord_tmd)
+
+    return OrderInfo(
+        code=code,
+        side=side,
+        order_type=order_type,
+        quantity=quantity,
+        price=price,
+        status=OrderStatus.ACCEPTED,
+        order_no=order_no,
+        filled_qty=0,
+        timestamp=order_dt,
+        raw_response=dict(output),  # 원본 보존 (dict 복사)
+    )
+
+
+def parse_cancel_response(
+    response: KisResponse,
+    *,
+    code: str,
+    side: OrderSide,
+    order_type: OrderType,
+    quantity: int,
+    price: int,
+    timestamp: datetime,
+) -> OrderInfo:
+    """
+    취소 POST 응답 → OrderInfo(status=CANCELLED).
+
+    응답 구조는 매수/매도와 동일 (ODNO는 취소 주문번호).
+    원래 주문번호가 아님에 주의 — 호출자(Order)가 관리.
+
+    Raises:
+        KisParseError: output 구조 불일치
+    """
+    output = response.output
+    if not isinstance(output, dict):
+        raise KisParseError(
+            f"취소 응답 output이 dict가 아님: {type(output).__name__}"
+        )
+
+    cancel_order_no = str(output.get("ODNO", "")).strip()
+    ord_tmd = str(output.get("ORD_TMD", "")).strip()
+    cancel_dt = _parse_order_datetime("", ord_tmd)
+
+    return OrderInfo(
+        code=code,
+        side=side,
+        order_type=order_type,
+        quantity=quantity,
+        price=price,
+        status=OrderStatus.CANCELLED,
+        order_no=cancel_order_no if cancel_order_no else None,
+        filled_qty=0,
+        timestamp=cancel_dt,
+        raw_response=dict(output),
+    )
+
+
+def _parse_order_status_from_qty(
+    ord_qty: int,
+    tot_ccld_qty: int,
+    cncl_yn: str = "N",
+) -> OrderStatus:
+    """
+    수량 및 취소여부로 OrderStatus 결정.
+
+    Args:
+        ord_qty:      주문수량
+        tot_ccld_qty: 누적체결수량
+        cncl_yn:      "Y"=취소됨
+
+    Returns:
+        CANCELLED / FILLED / PARTIAL / ACCEPTED
+    """
+    if cncl_yn == "Y":
+        return OrderStatus.CANCELLED
+    if tot_ccld_qty <= 0:
+        return OrderStatus.ACCEPTED   # 미체결
+    if tot_ccld_qty >= ord_qty:
+        return OrderStatus.FILLED     # 전량체결
+    return OrderStatus.PARTIAL        # 일부체결
+
+
+def parse_pending_order_list(response: KisResponse) -> list[OrderInfo]:
+    """
+    미체결 조회 응답 → list[OrderInfo].
+
+    KIS API: inquire-psbl-rvsecncl
+    응답 구조: output (list)
+
+    빈 리스트 응답 시 빈 list 반환 (예외 아님).
+
+    Raises:
+        KisParseError: output 구조 불일치
+    """
+    output = response.output
+    if output is None or output == {} or output == []:
+        return []
+    if not isinstance(output, list):
+        raise KisParseError(
+            f"미체결 조회 output이 list가 아님: {type(output).__name__}"
+        )
+
+    result: list[OrderInfo] = []
+    for idx, item in enumerate(output):
+        if not isinstance(item, dict):
+            raise KisParseError(
+                f"미체결 항목[{idx}]이 dict가 아님: {type(item)}"
+            )
+
+        try:
+            side = _to_order_side(str(item.get("sll_buy_dvsn_cd", "")))
+        except KisParseError as e:
+            raise KisParseError(
+                f"미체결 항목[{idx}] 매수/매도 파싱 실패: {e}"
+            ) from e
+
+        order_type = _to_order_type(str(item.get("ord_dvsn_cd", "00")))
+
+        ord_qty = _to_int(item.get("ord_qty"), "ord_qty")
+        tot_ccld_qty = _to_int(item.get("tot_ccld_qty"), "tot_ccld_qty")
+        ord_unpr = _to_int(item.get("ord_unpr"), "ord_unpr")
+
+        # 미체결 API는 취소 주문을 포함하지 않으므로 cncl_yn 없음
+        status = _parse_order_status_from_qty(
+            ord_qty=ord_qty,
+            tot_ccld_qty=tot_ccld_qty,
+            cncl_yn="N",
+        )
+
+        order_no = str(item.get("odno", "")).strip()
+        ord_dt = str(item.get("ord_dt", "")).strip()
+        ord_tmd = str(item.get("ord_tmd", "")).strip()
+        order_dt = _parse_order_datetime(ord_dt, ord_tmd)
+
+        result.append(OrderInfo(
+            code=str(item.get("pdno", "")).strip(),
+            side=side,
+            order_type=order_type,
+            quantity=ord_qty,
+            price=ord_unpr,
+            status=status,
+            order_no=order_no if order_no else None,
+            filled_qty=tot_ccld_qty,
+            timestamp=order_dt,
+            raw_response=dict(item),
+        ))
+
+    return result
+
+
+def parse_filled_order_list(response: KisResponse) -> list[OrderInfo]:
+    """
+    당일 체결 조회 응답 → list[OrderInfo].
+
+    KIS API: inquire-daily-ccld
+    응답 구조: output1 (list), output2 (요약 - 이 파서에서는 사용 안 함)
+
+    빈 리스트 응답 시 빈 list 반환.
+
+    Raises:
+        KisParseError: output1 구조 불일치
+    """
+    output1 = response.output1
+    if output1 is None or output1 == {} or output1 == []:
+        return []
+    if not isinstance(output1, list):
+        raise KisParseError(
+            f"체결 조회 output1이 list가 아님: {type(output1).__name__}"
+        )
+
+    result: list[OrderInfo] = []
+    for idx, item in enumerate(output1):
+        if not isinstance(item, dict):
+            raise KisParseError(
+                f"체결 항목[{idx}]이 dict가 아님: {type(item)}"
+            )
+
+        try:
+            side = _to_order_side(str(item.get("sll_buy_dvsn_cd", "")))
+        except KisParseError as e:
+            raise KisParseError(
+                f"체결 항목[{idx}] 매수/매도 파싱 실패: {e}"
+            ) from e
+
+        order_type = _to_order_type(str(item.get("ord_dvsn_cd", "00")))
+
+        ord_qty = _to_int(item.get("ord_qty"), "ord_qty")
+        tot_ccld_qty = _to_int(item.get("tot_ccld_qty"), "tot_ccld_qty")
+        ord_unpr = _to_int(item.get("ord_unpr"), "ord_unpr")
+        cncl_yn = str(item.get("cncl_yn", "N")).strip().upper()
+
+        status = _parse_order_status_from_qty(
+            ord_qty=ord_qty,
+            tot_ccld_qty=tot_ccld_qty,
+            cncl_yn=cncl_yn,
+        )
+
+        order_no = str(item.get("odno", "")).strip()
+        ord_dt = str(item.get("ord_dt", "")).strip()
+        ord_tmd = str(item.get("ord_tmd", "")).strip()
+        order_dt = _parse_order_datetime(ord_dt, ord_tmd)
+
+        result.append(OrderInfo(
+            code=str(item.get("pdno", "")).strip(),
+            side=side,
+            order_type=order_type,
+            quantity=ord_qty,
+            price=ord_unpr,
+            status=status,
+            order_no=order_no if order_no else None,
+            filled_qty=tot_ccld_qty,
+            timestamp=order_dt,
+            raw_response=dict(item),
+        ))
+
+    return result
