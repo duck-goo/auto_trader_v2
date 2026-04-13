@@ -143,3 +143,21 @@ class RowMapper:
             if item is not None:
                 result.append(item)
         return result
+
+class NegativePositionError(RepositoryError):
+    """Raised when an execution would drive a position negative (short sell)."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        current_qty: int,
+        sell_qty: int,
+    ) -> None:
+        super().__init__(
+            "Execution would cause negative position: "
+            f"symbol={symbol}, current_qty={current_qty}, sell_qty={sell_qty}"
+        )
+        self.symbol = symbol
+        self.current_qty = current_qty
+        self.sell_qty = sell_qty
