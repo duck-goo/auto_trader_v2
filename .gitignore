@@ -20,6 +20,9 @@ build/
 # 로그
 logs/
 *.log
+.tmp/
+.pytest_tmp/
+.pytest_cache/
 
 # IDE
 .vscode/

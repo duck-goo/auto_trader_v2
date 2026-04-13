@@ -15,8 +15,8 @@ from storage.migrations.runner import run_migrations
 
 
 @pytest.fixture
-def tmp_db(tmp_path: Path) -> Path:
-    return tmp_path / "test.db"
+def tmp_db(test_db_path):
+    return test_db_path
 
 
 def test_migration_creates_all_tables(tmp_db: Path):

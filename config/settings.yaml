@@ -57,6 +57,6 @@ http:
   # User-Agent (KIS 공식 샘플 기본값 사용 권장)
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-  db:
-  path: ./data/trading.db
+db:
+  path: "./data/trading.db"
   busy_timeout_ms: 5000
