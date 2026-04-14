@@ -104,7 +104,15 @@ import pandas as pd
 # ============================================================
 # 캔들 DataFrame 스키마 (고정)
 # ============================================================
-CANDLE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
+CANDLE_COLUMNS = [
+    "datetime",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "trade_value",
+]
 
 
 def _empty_candle_df() -> "pd.DataFrame":
@@ -117,6 +125,7 @@ def _empty_candle_df() -> "pd.DataFrame":
             "low": pd.Series(dtype="int64"),
             "close": pd.Series(dtype="int64"),
             "volume": pd.Series(dtype="int64"),
+            "trade_value": pd.Series(dtype="int64"),
         }
     )
 
@@ -173,6 +182,10 @@ def parse_daily_candles(response: KisResponse) -> "pd.DataFrame":
                 "low": _to_int(item.get("stck_lwpr"), "stck_lwpr"),
                 "close": _to_int(item.get("stck_clpr"), "stck_clpr"),
                 "volume": _to_int(item.get("acml_vol"), "acml_vol"),
+                "trade_value": _to_int(
+                    item.get("acml_tr_pbmn"),
+                    "acml_tr_pbmn",
+                ),
             }
         )
 
@@ -183,9 +196,16 @@ def parse_daily_candles(response: KisResponse) -> "pd.DataFrame":
     # 과거 → 현재 오름차순
     df = df.sort_values("datetime").reset_index(drop=True)
     # 타입 강제
-    for col in ("open", "high", "low", "close", "volume"):
-        df[col] = df[col].astype("int64")
-    return df
+    return df.astype(
+        {
+            "open": "int64",
+            "high": "int64",
+            "low": "int64",
+            "close": "int64",
+            "volume": "int64",
+            "trade_value": "int64",
+        }
+    )
 
 
 def parse_minute_candles(response: KisResponse) -> "pd.DataFrame":
@@ -234,6 +254,7 @@ def parse_minute_candles(response: KisResponse) -> "pd.DataFrame":
                 "low": _to_int(item.get("stck_lwpr"), "stck_lwpr"),
                 "close": _to_int(item.get("stck_prpr"), "stck_prpr"),
                 "volume": _to_int(item.get("cntg_vol"), "cntg_vol"),
+                "trade_value": 0,
             }
         )
 
@@ -242,9 +263,16 @@ def parse_minute_candles(response: KisResponse) -> "pd.DataFrame":
 
     df = pd.DataFrame(rows, columns=CANDLE_COLUMNS)
     df = df.sort_values("datetime").reset_index(drop=True)
-    for col in ("open", "high", "low", "close", "volume"):
-        df[col] = df[col].astype("int64")
-    return df
+    return df.astype(
+        {
+            "open": "int64",
+            "high": "int64",
+            "low": "int64",
+            "close": "int64",
+            "volume": "int64",
+            "trade_value": "int64",
+        }
+    )
 
 def _parse_holding(item: dict) -> Holding:
     """output1 항목 → Holding. 수량 0인 종목은 호출자가 필터링."""
