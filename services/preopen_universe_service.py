@@ -20,6 +20,10 @@ from services.market_master_refresh_service import (
     MarketMasterRefreshItem,
     MarketMasterRefreshService,
 )
+from services.market_master_validation_service import (
+    MarketMasterValidationResult,
+    MarketMasterValidationService,
+)
 from services.universe_build_service import (
     UniverseBuildResult,
     UniverseBuildService,
@@ -51,6 +55,7 @@ class PreopenMarketMasterResult:
     refreshed_at: str
     refreshed_trade_date: str
     is_same_trade_date: bool
+    validation_result: MarketMasterValidationResult
     rows: tuple[MarketMasterRow, ...]
 
 
@@ -167,12 +172,16 @@ class PreopenUniverseService:
         market_master_repo: MarketMasterRepository,
         universe_repo: UniverseCandidateRepository,
         filter_service: UniverseFilterService | None = None,
+        market_master_validation_service: MarketMasterValidationService | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
         self._market_master_repo = market_master_repo
         self._universe_repo = universe_repo
         self._filter_service = filter_service or UniverseFilterService()
+        self._market_master_validation_service = (
+            market_master_validation_service or MarketMasterValidationService()
+        )
         self._now_fn = now_fn or _default_now
 
     def prepare(
@@ -184,6 +193,7 @@ class PreopenUniverseService:
         use_existing_market_master: bool = False,
         require_same_day_market_master: bool = False,
         min_market_master_count: int | None = None,
+        required_markets: Sequence[str] | None = None,
         filter_settings: UniverseFilterSettings,
         daily_count: int = 40,
         write_universe: bool = False,
@@ -214,6 +224,7 @@ class PreopenUniverseService:
                 trade_date=trade_date,
                 require_same_day_market_master=require_same_day_market_master,
                 min_market_master_count=min_market_master_count,
+                required_markets=required_markets,
             )
         else:
             if master_items is None:
@@ -226,6 +237,7 @@ class PreopenUniverseService:
                 trade_date=trade_date,
                 require_same_day_market_master=require_same_day_market_master,
                 min_market_master_count=min_market_master_count,
+                required_markets=required_markets,
             )
         self._ensure_market_master_count(
             market_master_result=market_master_result,
@@ -269,6 +281,7 @@ class PreopenUniverseService:
         trade_date: str,
         require_same_day_market_master: bool,
         min_market_master_count: int | None,
+        required_markets: Sequence[str] | None,
     ) -> PreopenMarketMasterResult:
         refresh_result = MarketMasterRefreshService(
             conn=self._conn,
@@ -283,6 +296,7 @@ class PreopenUniverseService:
             trade_date=trade_date,
             require_same_day_market_master=require_same_day_market_master,
             min_market_master_count=min_market_master_count,
+            required_markets=required_markets,
         )
 
     def _load_existing_market_master(
@@ -291,6 +305,7 @@ class PreopenUniverseService:
         trade_date: str,
         require_same_day_market_master: bool,
         min_market_master_count: int | None,
+        required_markets: Sequence[str] | None,
     ) -> PreopenMarketMasterResult:
         snapshot = MarketMasterQueryService(
             market_master_repo=self._market_master_repo,
@@ -311,6 +326,7 @@ class PreopenUniverseService:
             trade_date=trade_date,
             require_same_day_market_master=require_same_day_market_master,
             min_market_master_count=min_market_master_count,
+            required_markets=required_markets,
         )
 
     def _build_market_master_result(
@@ -323,9 +339,15 @@ class PreopenUniverseService:
         trade_date: str,
         require_same_day_market_master: bool,
         min_market_master_count: int | None,
+        required_markets: Sequence[str] | None,
     ) -> PreopenMarketMasterResult:
         refreshed_trade_date = _to_trade_date(refreshed_at)
         is_same_trade_date = refreshed_trade_date == trade_date
+        validation_result = self._market_master_validation_service.validate_items(
+            items=_rows_to_master_items(rows),
+            min_symbol_count=min_market_master_count,
+            required_markets=required_markets,
+        )
 
         if require_same_day_market_master and not is_same_trade_date:
             raise ServiceError(
@@ -340,6 +362,7 @@ class PreopenUniverseService:
             refreshed_at=refreshed_at,
             refreshed_trade_date=refreshed_trade_date,
             is_same_trade_date=is_same_trade_date,
+            validation_result=validation_result,
             rows=rows,
         )
 

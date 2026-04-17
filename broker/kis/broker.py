@@ -105,6 +105,17 @@ class KisBroker(BrokerInterface):
     ) -> "pd.DataFrame":
         return self._quote.get_minute_candles(code, interval)
 
+    def get_same_day_minute_candles(
+        self,
+        code: str,
+        *,
+        end_time: str | None = None,
+    ) -> "pd.DataFrame":
+        return self._quote.get_same_day_minute_candles(
+            code,
+            end_time=end_time,
+        )
+
     def get_balance(self) -> "Balance":
         return self._account.get_balance()
 

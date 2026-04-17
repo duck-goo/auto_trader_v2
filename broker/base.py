@@ -42,6 +42,22 @@ class BrokerInterface(ABC):
     ) -> "pd.DataFrame":
         raise NotImplementedError
 
+    def get_same_day_minute_candles(
+        self,
+        code: str,
+        *,
+        end_time: str | None = None,
+    ) -> "pd.DataFrame":
+        """
+        Same-day 1-minute candles backfilled within the current KST trade_date.
+
+        Default implementation is optional so existing fake brokers do not need
+        to implement it unless a strategy explicitly requires same-day backfill.
+        """
+        raise NotImplementedError(
+            "This broker does not support same-day minute backfill."
+        )
+
     @abstractmethod
     def get_balance(self) -> "Balance":
         raise NotImplementedError

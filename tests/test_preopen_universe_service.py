@@ -215,6 +215,20 @@ def test_prepare_dry_run_refreshes_master_and_skips_universe_write(test_db_path)
         assert result.market_master_result.symbol_count == 2
         assert result.market_master_result.refreshed_trade_date == TRADE_DATE
         assert result.market_master_result.is_same_trade_date is True
+        assert result.market_master_result.validation_result.total_count == 2
+        assert result.market_master_result.validation_result.is_valid is True
+        assert [
+            (row.name, row.count)
+            for row in result.market_master_result.validation_result.market_counts
+        ] == [("ETF", 1), ("KOSPI", 1)]
+        positive_flags = {
+            row.name: row.count
+            for row in result.market_master_result.validation_result.flag_counts
+            if row.count > 0
+        }
+        assert positive_flags == {
+            "is_etf": 1,
+        }
         assert result.source_item_count == 2
         assert result.universe_build_result.outcome == UniverseBuildOutcome.DRY_RUN
         assert UniverseCandidateRepository(conn).list_for_date(TRADE_DATE) == []
@@ -318,6 +332,50 @@ def test_prepare_uses_existing_db_market_master_without_refresh(test_db_path):
         assert result.market_master_result.refreshed_at == "2026-04-14T07:55:00+09:00"
         assert result.market_master_result.refreshed_trade_date == TRADE_DATE
         assert result.market_master_result.is_same_trade_date is True
+        assert result.market_master_result.validation_result.total_count == 2
+        assert result.market_master_result.validation_result.is_valid is True
+        positive_flags = {
+            row.name: row.count
+            for row in result.market_master_result.validation_result.flag_counts
+            if row.count > 0
+        }
+        assert positive_flags == {
+            "is_etf": 1,
+        }
+    finally:
+        conn.close()
+
+
+def test_prepare_includes_required_market_validation_warning(test_db_path):
+    conn = _make_conn(test_db_path)
+    try:
+        service = PreopenUniverseService(
+            conn=conn,
+            market_master_repo=MarketMasterRepository(conn),
+            universe_repo=UniverseCandidateRepository(conn),
+            now_fn=_fixed_now(),
+        )
+        broker = FakeBroker(
+            {
+                "035420": _daily_df(close_price=180000, trade_value=410_000_000_000),
+                "069500": _daily_df(close_price=36250, trade_value=120_000_000_000),
+            }
+        )
+
+        result = service.prepare(
+            broker=broker,
+            trade_date=TRADE_DATE,
+            master_items=_master_items(),
+            required_markets=["KOSPI", "KOSDAQ"],
+            filter_settings=_settings(),
+            write_universe=False,
+        )
+
+        assert result.market_master_result.validation_result.is_valid is False
+        assert result.market_master_result.validation_result.warnings == (
+            "required markets are missing: KOSDAQ",
+        )
+        assert result.universe_build_result.outcome == UniverseBuildOutcome.DRY_RUN
     finally:
         conn.close()
 

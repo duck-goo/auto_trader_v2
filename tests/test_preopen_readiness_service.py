@@ -288,6 +288,32 @@ def test_prepare_and_check_skips_startup_when_universe_not_saved(test_db_path):
         conn.close()
 
 
+def test_prepare_and_check_propagates_required_market_validation(test_db_path):
+    conn = _make_conn(test_db_path)
+    try:
+        result = _make_service(conn).prepare_and_check(
+            broker=_make_broker(),
+            trade_date=TRADE_DATE,
+            master_items=_master_items(),
+            required_markets=["KOSPI", "KOSDAQ"],
+            filter_settings=_settings(),
+            write_universe=False,
+            run_startup_check=False,
+        )
+
+        assert result.outcome == PreopenReadinessOutcome.PREPARED_ONLY
+        assert (
+            result.preopen_universe_result.market_master_result.validation_result.is_valid
+            is False
+        )
+        assert (
+            result.preopen_universe_result.market_master_result.validation_result.warnings
+            == ("required markets are missing: KOSDAQ",)
+        )
+    finally:
+        conn.close()
+
+
 def test_prepare_and_check_ready_after_saved_universe(test_db_path):
     conn = _make_conn(test_db_path)
     try:

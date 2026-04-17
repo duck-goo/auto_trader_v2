@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from storage.repositories.base import (
     RepositoryInvariantError,
@@ -23,6 +25,26 @@ from storage.repositories.status_map import (
     assert_transition_allowed,
     coerce_db_order_status,
 )
+
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_trade_date(value: str) -> datetime:
+    text = require_non_empty_text("trade_date", value)
+    if not _DATE_PATTERN.match(text):
+        raise ValueError(f"trade_date must be YYYY-MM-DD: {value!r}")
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"trade_date is not a valid date: {value!r}") from exc
+
+
+def _day_bounds_kst(trade_date: str) -> tuple[str, str]:
+    day = _parse_trade_date(trade_date)
+    next_day = day + timedelta(days=1)
+    start = day.strftime("%Y-%m-%dT00:00:00+09:00")
+    end = next_day.strftime("%Y-%m-%dT00:00:00+09:00")
+    return start, end
 
 
 @dataclass(frozen=True)
@@ -593,6 +615,36 @@ class OrderRepository:
             OrderRow,
             converters={"status": coerce_db_order_status},
         )
+
+    def count_requested_for_trade_date(
+        self,
+        *,
+        trade_date: str,
+        side: str | None = None,
+    ) -> int:
+        day_start, day_end = _day_bounds_kst(trade_date)
+        if side is None:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM orders
+                WHERE requested_at >= ? AND requested_at < ?
+                """,
+                (day_start, day_end),
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+
+        normalized_side = require_side(side)
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM orders
+            WHERE requested_at >= ? AND requested_at < ?
+              AND side = ?
+            """,
+            (day_start, day_end, normalized_side),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def _get_required_by_client_order_id(self, client_order_id: str) -> OrderRow:
         row = self.get_by_client_order_id(client_order_id)

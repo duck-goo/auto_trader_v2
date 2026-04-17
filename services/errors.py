@@ -7,6 +7,26 @@ class ServiceError(RuntimeError):
     """Base class for service-layer errors."""
 
 
+class RuntimeLockBusyError(ServiceError):
+    """Raised when another live process already holds a runtime lock."""
+
+    def __init__(
+        self,
+        *,
+        lock_name: str,
+        owner_id: str,
+        expires_at: str,
+    ) -> None:
+        super().__init__(
+            "Runtime lock is already held by another process: "
+            f"lock_name={lock_name!r}, owner_id={owner_id!r}, "
+            f"expires_at={expires_at}"
+        )
+        self.lock_name = lock_name
+        self.owner_id = owner_id
+        self.expires_at = expires_at
+
+
 class DuplicateClientOrderIdError(ServiceError):
     """Raised when client_order_id generation keeps colliding with DB UNIQUE."""
 
