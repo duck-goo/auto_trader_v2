@@ -311,12 +311,15 @@ def test_timing2_setup_scan_result_to_payload_has_expected_shape():
                     market="KOSPI",
                     evaluation_trade_date="2026-04-15",
                     latest_daily_date="2026-04-14",
-                    latest_close=168300,
+                    latest_close=150000,
                     previous_close=129500,
-                    official_upper_limit_price=168300,
-                    prior_lookback_high=167000,
+                    latest_volume=500000,
+                    previous_volume=100000,
+                    close_gain_rate=0.158301,
+                    volume_ratio=5.0,
+                    lookback_highest_close=150000,
                     lookback_start_date="2026-01-14",
-                    lookback_end_date="2026-04-13",
+                    lookback_end_date="2026-04-14",
                 ),
             ),
         ),
@@ -330,7 +333,5 @@ def test_timing2_setup_scan_result_to_payload_has_expected_shape():
     assert payload["recorded_count"] == 0
     assert payload["recorded_signal_ids"] == []
     assert payload["candidates"][0]["symbol"] == "005930"
-    assert (
-        payload["candidates"][0]["match"]["official_upper_limit_price"]
-        == 168300
-    )
+    assert payload["candidates"][0]["match"]["lookback_highest_close"] == 150000
+    assert payload["candidates"][0]["match"]["volume_ratio"] == 5.0

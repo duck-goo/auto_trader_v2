@@ -39,6 +39,12 @@ class DailyStatsRow:
     error_count: int
 
 
+@dataclass
+class _OpenLot:
+    qty: int
+    price: int
+
+
 _SELECT_COLUMNS = "trade_date, realized_pnl, order_count, fill_count, error_count"
 
 
@@ -67,21 +73,15 @@ class DailyStatsRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    # ------------------------------------------------------------------
-    # Write
-    # ------------------------------------------------------------------
-    def recompute_day(self, trade_date: str) -> DailyStatsRow:
+    def calculate_day(self, trade_date: str) -> DailyStatsRow:
         """
-        Recompute stats for a single trade day from orders/executions and
-        UPSERT into daily_stats.
+        Return a fresh read-only snapshot for one trade day.
 
-        realized_pnl is set to 0 in this phase; FIFO-based PnL matching
-        lives in Phase 3.
-
-        This method must run inside `with transaction(conn):`.
+        realized_pnl is computed from execution history using FIFO matching.
+        Only sell executions that happened within the requested trade day
+        contribute to that day's realized_pnl, but their cost basis may come
+        from prior-day buy executions.
         """
-        require_write_transaction(self._conn)
-        # Validate and normalize: reject "2026-4-1" etc.
         _parse_trade_date(trade_date)
         day_start, day_end = _day_bounds_kst(trade_date)
 
@@ -110,7 +110,31 @@ class DailyStatsRepository:
             (day_start, day_end),
         ).fetchone()[0]
 
-        realized_pnl = 0  # TODO(phase-3): inject from FIFO PnL service.
+        realized_pnl = self._calculate_realized_pnl(
+            day_start=day_start,
+            day_end=day_end,
+        )
+
+        return DailyStatsRow(
+            trade_date=trade_date,
+            realized_pnl=int(realized_pnl),
+            order_count=int(order_count),
+            fill_count=int(fill_count),
+            error_count=int(error_count),
+        )
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
+    def recompute_day(self, trade_date: str) -> DailyStatsRow:
+        """
+        Recompute stats for a single trade day from orders/executions and
+        UPSERT into daily_stats.
+
+        This method must run inside `with transaction(conn):`.
+        """
+        require_write_transaction(self._conn)
+        snapshot = self.calculate_day(trade_date)
 
         self._conn.execute(
             """
@@ -124,9 +148,15 @@ class DailyStatsRepository:
                 fill_count = excluded.fill_count,
                 error_count = excluded.error_count
             """,
-            (trade_date, realized_pnl, order_count, fill_count, error_count),
+            (
+                snapshot.trade_date,
+                snapshot.realized_pnl,
+                snapshot.order_count,
+                snapshot.fill_count,
+                snapshot.error_count,
+            ),
         )
-        return self._get_required(trade_date)
+        return self._get_required(snapshot.trade_date)
 
     # ------------------------------------------------------------------
     # Read
@@ -173,3 +203,89 @@ class DailyStatsRepository:
                 f"trade_date={trade_date!r}"
             )
         return row
+
+    def _calculate_realized_pnl(
+        self,
+        *,
+        day_start: str,
+        day_end: str,
+    ) -> int:
+        rows = self._conn.execute(
+            """
+            SELECT id, symbol, side, qty, price, executed_at
+            FROM executions
+            WHERE executed_at < ?
+            ORDER BY executed_at ASC, id ASC
+            """,
+            (day_end,),
+        ).fetchall()
+
+        open_lots_by_symbol: dict[str, list[_OpenLot]] = {}
+        realized_pnl = 0
+
+        for row in rows:
+            symbol = require_non_empty_text("symbol", row["symbol"])
+            side = require_non_empty_text("side", row["side"])
+            qty = int(row["qty"])
+            price = int(row["price"])
+            executed_at = require_non_empty_text("executed_at", row["executed_at"])
+
+            if side == "buy":
+                lots = open_lots_by_symbol.setdefault(symbol, [])
+                lots.append(_OpenLot(qty=qty, price=price))
+                continue
+
+            if side != "sell":
+                raise RepositoryInvariantError(
+                    "Unsupported execution side while computing realized_pnl: "
+                    f"symbol={symbol}, side={side!r}, executed_at={executed_at}"
+                )
+
+            realized_pnl += self._match_sell_execution_fifo(
+                symbol=symbol,
+                sell_qty=qty,
+                sell_price=price,
+                executed_at=executed_at,
+                day_start=day_start,
+                day_end=day_end,
+                open_lots_by_symbol=open_lots_by_symbol,
+            )
+
+        return realized_pnl
+
+    def _match_sell_execution_fifo(
+        self,
+        *,
+        symbol: str,
+        sell_qty: int,
+        sell_price: int,
+        executed_at: str,
+        day_start: str,
+        day_end: str,
+        open_lots_by_symbol: dict[str, list[_OpenLot]],
+    ) -> int:
+        lots = open_lots_by_symbol.setdefault(symbol, [])
+        remaining_qty = sell_qty
+        matched_realized_pnl = 0
+        is_target_day_sell = day_start <= executed_at < day_end
+
+        while remaining_qty > 0:
+            if not lots:
+                raise RepositoryInvariantError(
+                    "Cannot compute FIFO realized_pnl because a sell execution "
+                    "has no matching open buy lot: "
+                    f"symbol={symbol}, executed_at={executed_at}, "
+                    f"sell_qty={sell_qty}, remaining_qty={remaining_qty}"
+                )
+
+            current_lot = lots[0]
+            matched_qty = min(remaining_qty, current_lot.qty)
+            if is_target_day_sell:
+                matched_realized_pnl += (sell_price - current_lot.price) * matched_qty
+
+            current_lot.qty -= matched_qty
+            remaining_qty -= matched_qty
+            if current_lot.qty == 0:
+                lots.pop(0)
+
+        return matched_realized_pnl

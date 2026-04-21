@@ -88,19 +88,33 @@ def _daily_df(*, match: bool) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     start = datetime(2026, 1, 1)
 
-    prior_closes = [100_000 + (index * 500) for index in range(60)]
+    prior_closes = [100_000 + (index * 500) for index in range(59)]
     for index, close_price in enumerate(prior_closes):
         day = start + timedelta(days=index)
         rows.append(
             {
                 "datetime": KST.localize(datetime(day.year, day.month, day.day)),
                 "open": close_price - 100,
-                "high": close_price + (200 if match or index != 10 else 40_000),
+                "high": close_price + 200,
                 "low": close_price - 200,
                 "close": close_price,
                 "volume": 100_000,
             }
         )
+
+    previous_day = start + timedelta(days=59)
+    rows.append(
+        {
+            "datetime": KST.localize(
+                datetime(previous_day.year, previous_day.month, previous_day.day)
+            ),
+            "open": 129_400,
+            "high": 129_700,
+            "low": 129_300,
+            "close": 129_500,
+            "volume": 100_000,
+        }
+    )
 
     latest_day = start + timedelta(days=60)
     rows.append(
@@ -108,11 +122,11 @@ def _daily_df(*, match: bool) -> pd.DataFrame:
             "datetime": KST.localize(
                 datetime(latest_day.year, latest_day.month, latest_day.day)
             ),
-            "open": 140_000,
-            "high": 168_300 if match else 167_800,
-            "low": 139_000,
-            "close": 168_300 if match else 167_800,
-            "volume": 5_000_000,
+            "open": 149_000 if match else 139_000,
+            "high": 150_200 if match else 140_200,
+            "low": 148_000 if match else 138_000,
+            "close": 150_000 if match else 140_000,
+            "volume": 500_000 if match else 499_999,
         }
     )
     rows.append(

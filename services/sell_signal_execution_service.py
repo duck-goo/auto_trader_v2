@@ -21,11 +21,35 @@ from services.sell_exit_scan_service import (
     STRATEGY_NAME_SELL_STOP_LOSS,
     STRATEGY_NAME_SELL_TAKE_PROFIT,
 )
+from services.timing2_lot_exit_scan_service import (
+    STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK,
+    STRATEGY_NAME_TIMING2_LOT_STOP_LOSS,
+    STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+)
 from storage.db import transaction
-from storage.repositories import OrderRepository, PositionRepository, SignalRepository, SignalRow
+from storage.repositories import (
+    EntryLotRepository,
+    OrderRepository,
+    PositionRepository,
+    SignalRepository,
+    SignalRow,
+)
 
 
 STRATEGY_NAME_SELL_EXECUTION_AUDIT = "sell_execution_attempt"
+_LOT_LEVEL_SELL_STRATEGIES = {
+    STRATEGY_NAME_TIMING2_LOT_STOP_LOSS,
+    STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK,
+    STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+}
+_SELL_STRATEGY_PRIORITIES = {
+    STRATEGY_NAME_SELL_STOP_LOSS: 0,
+    STRATEGY_NAME_TIMING2_LOT_STOP_LOSS: 0,
+    STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK: 1,
+    STRATEGY_NAME_SELL_TAKE_PROFIT: 2,
+    STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL: 2,
+    STRATEGY_NAME_SELL_MACD_DECREASE: 3,
+}
 
 _KST = pytz.timezone("Asia/Seoul")
 _log = get_logger("order")
@@ -84,6 +108,9 @@ class SellTriggerSignalCandidate:
     trade_date: str
     source_strategy_name: str
     strategy_priority: int
+    lot_id: int | None
+    requested_sell_qty: int | None
+    sell_cost_rate: float | None
 
 
 @dataclass(frozen=True)
@@ -92,6 +119,10 @@ class SellSignalExecutionCandidate:
     symbol: str
     name: str
     source_strategy_name: str
+    lot_id: int | None
+    requested_sell_qty: int | None
+    order_qty: int | None
+    sell_cost_rate: float | None
     outcome: SellSignalExecutionOutcome
     reason_code: str | None
     reason_message: str | None
@@ -140,6 +171,7 @@ class SellSignalExecutionService:
         position_repo: PositionRepository,
         order_service: OrderService,
         risk_guard_service: TradingRiskGuardService,
+        entry_lot_repo: EntryLotRepository | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._broker = broker
@@ -149,6 +181,7 @@ class SellSignalExecutionService:
         self._position_repo = position_repo
         self._order_service = order_service
         self._risk_guard_service = risk_guard_service
+        self._entry_lot_repo = entry_lot_repo
         self._now_fn = now_fn or _default_now
 
     def execute_pending_signals(
@@ -192,7 +225,7 @@ class SellSignalExecutionService:
                 ),
             )
             processed.append(result_candidate)
-            if execute_orders:
+            if execute_orders and self._should_consume_signal(result_candidate):
                 audit_record_count += 1
                 acted_signal_ids.append(candidate.signal_id)
                 self._persist_consumed_signal(
@@ -292,11 +325,7 @@ class SellSignalExecutionService:
         rows = self._signal_repo.list_unacted(limit=signal_limit)
         candidates: list[SellTriggerSignalCandidate] = []
         for row in rows:
-            if row.strategy_name not in (
-                STRATEGY_NAME_SELL_STOP_LOSS,
-                STRATEGY_NAME_SELL_TAKE_PROFIT,
-                STRATEGY_NAME_SELL_MACD_DECREASE,
-            ):
+            if row.strategy_name not in _SELL_STRATEGY_PRIORITIES:
                 continue
             if not row.payload or row.payload.get("trade_date") != trade_date:
                 continue
@@ -307,12 +336,22 @@ class SellSignalExecutionService:
         payload = row.payload or {}
         name = self._require_payload_text(payload, "name", row.id)
         trade_date = self._require_payload_text(payload, "trade_date", row.id)
-        if row.strategy_name == STRATEGY_NAME_SELL_STOP_LOSS:
-            priority = 0
-        elif row.strategy_name == STRATEGY_NAME_SELL_TAKE_PROFIT:
-            priority = 1
-        else:
-            priority = 2
+        priority = _SELL_STRATEGY_PRIORITIES[row.strategy_name]
+        lot_id = None
+        requested_sell_qty = None
+        sell_cost_rate = None
+        if row.strategy_name in _LOT_LEVEL_SELL_STRATEGIES:
+            lot_id = self._require_payload_positive_int(payload, "lot_id", row.id)
+            requested_sell_qty = self._require_payload_positive_int(
+                payload,
+                "sell_qty",
+                row.id,
+            )
+            sell_cost_rate = self._require_payload_non_negative_float(
+                payload,
+                "sell_cost_rate",
+                row.id,
+            )
         return SellTriggerSignalCandidate(
             signal_id=row.id,
             signal_scanned_at=row.scanned_at,
@@ -321,6 +360,9 @@ class SellSignalExecutionService:
             trade_date=trade_date,
             source_strategy_name=row.strategy_name,
             strategy_priority=priority,
+            lot_id=lot_id,
+            requested_sell_qty=requested_sell_qty,
+            sell_cost_rate=sell_cost_rate,
         )
 
     @staticmethod
@@ -414,6 +456,16 @@ class SellSignalExecutionService:
                 f"avg_price={live_position.avg_price}"
             )
 
+        order_qty = live_position.qty
+        if candidate.lot_id is not None:
+            lot_guard = self._evaluate_lot_guard(
+                candidate=candidate,
+                live_position_qty=live_position.qty,
+            )
+            if isinstance(lot_guard, SellSignalExecutionCandidate):
+                return lot_guard
+            order_qty = lot_guard
+
         unresolved_sell_exists = any(
             row.symbol == candidate.symbol and row.side == "sell"
             for row in self._order_repo.find_unresolved()
@@ -424,6 +476,10 @@ class SellSignalExecutionService:
                 symbol=candidate.symbol,
                 name=candidate.name,
                 source_strategy_name=candidate.source_strategy_name,
+                lot_id=candidate.lot_id,
+                requested_sell_qty=candidate.requested_sell_qty,
+                order_qty=None,
+                sell_cost_rate=candidate.sell_cost_rate,
                 outcome=SellSignalExecutionOutcome.BLOCKED,
                 reason_code="UNRESOLVED_SELL_ORDER_EXISTS",
                 reason_message="An unresolved sell order already exists for this symbol.",
@@ -444,6 +500,10 @@ class SellSignalExecutionService:
                 symbol=candidate.symbol,
                 name=candidate.name,
                 source_strategy_name=candidate.source_strategy_name,
+                lot_id=candidate.lot_id,
+                requested_sell_qty=candidate.requested_sell_qty,
+                order_qty=order_qty,
+                sell_cost_rate=candidate.sell_cost_rate,
                 outcome=SellSignalExecutionOutcome.PREVIEW_READY,
                 reason_code=None,
                 reason_message=None,
@@ -458,7 +518,7 @@ class SellSignalExecutionService:
 
         order_result = self._place_order(
             symbol=candidate.symbol,
-            qty=live_position.qty,
+            qty=order_qty,
             strategy_name=candidate.source_strategy_name,
         )
         outcome = SellSignalExecutionOutcome(order_result.outcome.value)
@@ -467,6 +527,10 @@ class SellSignalExecutionService:
             symbol=candidate.symbol,
             name=candidate.name,
             source_strategy_name=candidate.source_strategy_name,
+            lot_id=candidate.lot_id,
+            requested_sell_qty=candidate.requested_sell_qty,
+            order_qty=order_qty,
+            sell_cost_rate=candidate.sell_cost_rate,
             outcome=outcome,
             reason_code=order_result.error_code,
             reason_message=order_result.error_message,
@@ -499,6 +563,10 @@ class SellSignalExecutionService:
                     "source_strategy_name": candidate.source_strategy_name,
                     "symbol": candidate.symbol,
                     "name": candidate.name,
+                    "source_lot_id": candidate.lot_id,
+                    "requested_sell_qty": candidate.requested_sell_qty,
+                    "order_qty": execution_candidate.order_qty,
+                    "sell_cost_rate": candidate.sell_cost_rate,
                     "execution_outcome": execution_candidate.outcome.value,
                     "reason_code": execution_candidate.reason_code,
                     "reason_message": execution_candidate.reason_message,
@@ -559,6 +627,10 @@ class SellSignalExecutionService:
             symbol=candidate.symbol,
             name=candidate.name,
             source_strategy_name=candidate.source_strategy_name,
+            lot_id=candidate.lot_id,
+            requested_sell_qty=candidate.requested_sell_qty,
+            order_qty=None,
+            sell_cost_rate=candidate.sell_cost_rate,
             outcome=SellSignalExecutionOutcome.BLOCKED,
             reason_code=reason_code,
             reason_message=reason_message,
@@ -582,6 +654,104 @@ class SellSignalExecutionService:
         return value.strip()
 
     @staticmethod
+    def _require_payload_positive_int(
+        payload: dict,
+        field_name: str,
+        signal_id: int,
+    ) -> int:
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                "Signal payload field is missing or invalid: "
+                f"id={signal_id}, field={field_name!r}, value={value!r}"
+            )
+        return value
+
+    @staticmethod
+    def _require_payload_non_negative_float(
+        payload: dict,
+        field_name: str,
+        signal_id: int,
+    ) -> float:
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                "Signal payload field is missing or invalid: "
+                f"id={signal_id}, field={field_name!r}, value={value!r}"
+            )
+        normalized = float(value)
+        if normalized < 0.0:
+            raise ValueError(
+                "Signal payload field must be non-negative: "
+                f"id={signal_id}, field={field_name!r}, value={value!r}"
+            )
+        return normalized
+
+    def _evaluate_lot_guard(
+        self,
+        *,
+        candidate: SellTriggerSignalCandidate,
+        live_position_qty: int,
+    ) -> int | SellSignalExecutionCandidate:
+        if self._entry_lot_repo is None:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="ENTRY_LOT_REPOSITORY_MISSING",
+                reason_message=(
+                    "Lot-level sell signals require EntryLotRepository wiring."
+                ),
+            )
+
+        lot = self._entry_lot_repo.get(candidate.lot_id)
+        if lot is None or lot.status != "OPEN" or lot.remaining_qty <= 0:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="ENTRY_LOT_NOT_OPEN",
+                reason_message=(
+                    "The source Timing2 entry lot is missing or no longer open: "
+                    f"lot_id={candidate.lot_id}"
+                ),
+            )
+
+        if lot.symbol != candidate.symbol:
+            raise ServiceError(
+                "Lot-level sell signal symbol mismatch: "
+                f"signal_symbol={candidate.symbol}, lot_symbol={lot.symbol}, "
+                f"lot_id={candidate.lot_id}"
+            )
+
+        requested_qty = candidate.requested_sell_qty
+        if requested_qty is None:
+            raise ServiceError(
+                "Lot-level sell signal is missing requested_sell_qty: "
+                f"signal_id={candidate.signal_id}"
+            )
+
+        if requested_qty > lot.remaining_qty:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="SELL_QTY_EXCEEDS_LOT_REMAINING",
+                reason_message=(
+                    "Signal sell_qty exceeds current lot remaining_qty: "
+                    f"sell_qty={requested_qty}, "
+                    f"lot_remaining_qty={lot.remaining_qty}, "
+                    f"lot_id={candidate.lot_id}"
+                ),
+            )
+
+        if requested_qty > live_position_qty:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="SELL_QTY_EXCEEDS_LIVE_POSITION",
+                reason_message=(
+                    "Signal sell_qty exceeds current live position qty: "
+                    f"sell_qty={requested_qty}, live_position_qty={live_position_qty}"
+                ),
+            )
+
+        return requested_qty
+
+    @staticmethod
     def _is_terminal_outcome(outcome: SellSignalExecutionOutcome) -> bool:
         return outcome in (
             SellSignalExecutionOutcome.SUBMITTED,
@@ -598,8 +768,11 @@ class SellSignalExecutionService:
             return True
         if candidate.outcome != SellSignalExecutionOutcome.BLOCKED:
             return False
+        if candidate.reason_code == "SUPERSEDED_BY_HIGHER_PRIORITY":
+            return candidate.lot_id is None
+        if candidate.reason_code == "UNRESOLVED_SELL_ORDER_EXISTS":
+            return candidate.lot_id is None
         return candidate.reason_code in {
-            "SUPERSEDED_BY_HIGHER_PRIORITY",
+            "ENTRY_LOT_NOT_OPEN",
             "LIVE_POSITION_MISSING",
-            "UNRESOLVED_SELL_ORDER_EXISTS",
         }

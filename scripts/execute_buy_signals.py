@@ -37,6 +37,7 @@ from services import (
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    DailyStatsRepository,
     OrderRepository,
     PositionRepository,
     RuntimeLockRepository,
@@ -92,6 +93,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional max total order count for the trade date. New buys are blocked once reached.",
+    )
+    parser.add_argument(
+        "--max-daily-loss",
+        type=int,
+        default=None,
+        help="Optional max realized daily loss in KRW. New buys are blocked once reached.",
     )
     parser.add_argument(
         "--start-time",
@@ -190,6 +197,7 @@ def _build_payload(
             "per_order_budget": settings.per_order_budget,
             "max_holdings": settings.max_holdings,
             "max_daily_order_count": settings.max_daily_order_count,
+            "max_daily_loss": settings.max_daily_loss,
             "start_time": settings.start_time,
             "cutoff_time": settings.cutoff_time,
         },
@@ -260,6 +268,7 @@ def main() -> int:
             per_order_budget=args.per_order_budget,
             max_holdings=args.max_holdings,
             max_daily_order_count=args.max_daily_order_count,
+            max_daily_loss=args.max_daily_loss,
             start_time=args.start_time,
             cutoff_time=args.cutoff_time,
         ).validated()
@@ -284,6 +293,10 @@ def main() -> int:
     _ok(
         "max_daily_order_count",
         "-" if execution_settings.max_daily_order_count is None else str(execution_settings.max_daily_order_count),
+    )
+    _ok(
+        "max_daily_loss",
+        "-" if execution_settings.max_daily_loss is None else str(execution_settings.max_daily_loss),
     )
     _ok("signal_limit", str(args.signal_limit))
     _ok("db_path", str(db_path))
@@ -354,6 +367,7 @@ def main() -> int:
             signal_repo = SignalRepository(conn)
             order_repo = OrderRepository(conn)
             position_repo = PositionRepository(conn)
+            daily_stats_repo = DailyStatsRepository(conn)
             trading_control_repo = TradingControlRepository(conn)
             order_service = OrderService(
                 broker=broker,
@@ -371,6 +385,7 @@ def main() -> int:
                 risk_guard_service=TradingRiskGuardService(
                     order_repo=order_repo,
                     trading_control_repo=trading_control_repo,
+                    daily_stats_repo=daily_stats_repo,
                 ),
             )
             result = service.execute_pending_signals(

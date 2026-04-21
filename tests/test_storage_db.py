@@ -21,7 +21,7 @@ def tmp_db(test_db_path):
 
 def test_migration_creates_all_tables(tmp_db: Path):
     count = run_migrations(tmp_db)
-    assert count == 7
+    assert count == 10
 
     conn = get_connection(tmp_db)
     try:
@@ -34,8 +34,9 @@ def test_migration_creates_all_tables(tmp_db: Path):
 
     expected = {"orders", "executions", "positions", "signals",
                 "daily_stats", "schema_version", "universe_candidates",
-                "market_master", "intraday_bars_15m", "runtime_locks",
-                "trading_controls",}
+                "market_master", "intraday_bars_15m", "intraday_bars_30s",
+                "runtime_locks", "trading_controls",
+                "current_price_samples", "entry_lots",}
     assert expected.issubset(names), f"누락된 테이블: {expected - names}"
 
 
@@ -43,7 +44,7 @@ def test_migration_idempotent(tmp_db: Path):
     """두 번 실행해도 안전해야 한다."""
     first = run_migrations(tmp_db)
     second = run_migrations(tmp_db)
-    assert first == 7
+    assert first == 10
     assert second == 0
 
 

@@ -22,6 +22,10 @@ from services.timing1_intraday_trigger_service import (
 from services.timing2_intraday_trigger_service import (
     STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER,
 )
+from services.timing2_30s_trigger_service import (
+    STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+    STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+)
 from storage.db import transaction
 from storage.repositories import (
     OrderRepository,
@@ -32,6 +36,12 @@ from storage.repositories import (
 
 
 STRATEGY_NAME_BUY_EXECUTION_AUDIT = "buy_execution_attempt"
+BUY_TRIGGER_STRATEGY_PRIORITIES = {
+    STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER: 0,
+    STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER: 1,
+    STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER: 1,
+    STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER: 1,
+}
 
 _KST = pytz.timezone("Asia/Seoul")
 _log = get_logger("order")
@@ -67,6 +77,7 @@ class BuySignalExecutionSettings:
     per_order_budget: int
     max_holdings: int
     max_daily_order_count: int | None = None
+    max_daily_loss: int | None = None
     start_time: str = "09:00:00"
     cutoff_time: str = "12:00:00"
 
@@ -82,6 +93,12 @@ class BuySignalExecutionSettings:
                 "max_daily_order_count",
                 max_daily_order_count,
             )
+        max_daily_loss = self.max_daily_loss
+        if max_daily_loss is not None:
+            max_daily_loss = _require_positive_int(
+                "max_daily_loss",
+                max_daily_loss,
+            )
         start_time = _require_time_text("start_time", self.start_time)
         cutoff_time = _require_time_text("cutoff_time", self.cutoff_time)
         if start_time >= cutoff_time:
@@ -93,6 +110,7 @@ class BuySignalExecutionSettings:
             per_order_budget=per_order_budget,
             max_holdings=max_holdings,
             max_daily_order_count=max_daily_order_count,
+            max_daily_loss=max_daily_loss,
             start_time=start_time,
             cutoff_time=cutoff_time,
         )
@@ -233,6 +251,7 @@ class BuySignalExecutionService:
             risk_guard = self._risk_guard_service.evaluate(
                 trade_date=trade_date,
                 max_daily_order_count=normalized_settings.max_daily_order_count,
+                max_daily_loss=normalized_settings.max_daily_loss,
             )
             if not risk_guard.buy_allowed:
                 for candidate in primary_candidates:
@@ -367,10 +386,7 @@ class BuySignalExecutionService:
         rows = self._signal_repo.list_unacted(limit=signal_limit)
         candidates: list[BuyTriggerSignalCandidate] = []
         for row in rows:
-            if row.strategy_name not in (
-                STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER,
-                STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER,
-            ):
+            if row.strategy_name not in BUY_TRIGGER_STRATEGY_PRIORITIES:
                 continue
             if not row.payload or row.payload.get("trade_date") != trade_date:
                 continue
@@ -382,7 +398,7 @@ class BuySignalExecutionService:
         name = self._require_payload_text(payload, "name", row.id)
         market = self._require_payload_text(payload, "market", row.id)
         trade_date = self._require_payload_text(payload, "trade_date", row.id)
-        priority = 0 if row.strategy_name == STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER else 1
+        priority = BUY_TRIGGER_STRATEGY_PRIORITIES[row.strategy_name]
         return BuyTriggerSignalCandidate(
             signal_id=row.id,
             signal_scanned_at=row.scanned_at,
@@ -673,6 +689,7 @@ class BuySignalExecutionService:
                     "per_order_budget": settings.per_order_budget,
                     "max_holdings": settings.max_holdings,
                     "max_daily_order_count": settings.max_daily_order_count,
+                    "max_daily_loss": settings.max_daily_loss,
                     "start_time": settings.start_time,
                     "cutoff_time": settings.cutoff_time,
                 },

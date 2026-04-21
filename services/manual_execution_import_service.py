@@ -11,17 +11,31 @@ import pytz
 
 from logger import get_logger
 from services.errors import ServiceError
+from services.timing2_lot_exit_scan_service import (
+    STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK,
+    STRATEGY_NAME_TIMING2_LOT_STOP_LOSS,
+    STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+)
 from storage.db import transaction
 from storage.repositories import (
     DbOrderStatus,
+    EntryLotRepository,
     ExecutionRepository,
     OrderRepository,
     PositionRepository,
+    SignalRepository,
 )
+from strategy import DEFAULT_TIMING2_SELL_COST_RATE
 
 
 _KST = pytz.timezone("Asia/Seoul")
 _log = get_logger("order")
+_SELL_EXECUTION_AUDIT_STRATEGY = "sell_execution_attempt"
+_LOT_LEVEL_SELL_STRATEGIES = {
+    STRATEGY_NAME_TIMING2_LOT_STOP_LOSS,
+    STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK,
+    STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+}
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,12 @@ class ManualExecutionImportResult:
     candidates: tuple[ManualExecutionImportCandidate, ...]
 
 
+@dataclass(frozen=True)
+class _SellLotExecutionContext:
+    lot_id: int
+    sell_cost_rate: float
+
+
 class ManualExecutionImportService:
     """Import manual execution rows in a conservative, idempotent way."""
 
@@ -89,11 +109,15 @@ class ManualExecutionImportService:
         order_repo: OrderRepository,
         execution_repo: ExecutionRepository,
         position_repo: PositionRepository,
+        entry_lot_repo: EntryLotRepository | None = None,
+        signal_repo: SignalRepository | None = None,
     ) -> None:
         self._conn = conn
         self._order_repo = order_repo
         self._execution_repo = execution_repo
         self._position_repo = position_repo
+        self._entry_lot_repo = entry_lot_repo
+        self._signal_repo = signal_repo
 
     def import_items(
         self,
@@ -246,6 +270,14 @@ class ManualExecutionImportService:
                 ),
             )
 
+        sell_lot_block = self._validate_sell_lot_context(
+            item=item,
+            order_row=order_row,
+            local_filled_qty_before=existing_filled_qty,
+        )
+        if sell_lot_block is not None:
+            return sell_lot_block
+
         projected_status = self._project_status(
             order_row=order_row,
             projected_filled_qty=projected_filled_qty,
@@ -287,6 +319,7 @@ class ManualExecutionImportService:
         )
 
     def _apply_import(self, *, item: ManualExecutionImportItem, order_row):
+        sell_lot_context = self._resolve_sell_lot_execution_context(order_row)
         with transaction(self._conn):
             inserted = self._execution_repo.insert_if_new(
                 order_id=order_row.id,
@@ -311,6 +344,27 @@ class ManualExecutionImportService:
                 price=item.price,
                 executed_at=item.executed_at,
             )
+            if order_row.side == "buy" and self._entry_lot_repo is not None:
+                self._entry_lot_repo.apply_buy_execution(
+                    entry_order_id=order_row.id,
+                    symbol=order_row.symbol,
+                    qty=item.qty,
+                    price=item.price,
+                    executed_at=item.executed_at,
+                    entry_strategy_name=order_row.strategy_name or "unknown",
+                )
+            if order_row.side == "sell" and sell_lot_context is not None:
+                if self._entry_lot_repo is None:
+                    raise ServiceError(
+                        "EntryLotRepository is required for lot-level sell import."
+                    )
+                self._entry_lot_repo.apply_sell_to_lot(
+                    lot_id=sell_lot_context.lot_id,
+                    qty=item.qty,
+                    price=item.price,
+                    executed_at=item.executed_at,
+                    sell_cost_rate=sell_lot_context.sell_cost_rate,
+                )
 
             if order_row.status == DbOrderStatus.CANCELLED:
                 updated_order = self._order_repo.sync_execution_summary(
@@ -323,6 +377,124 @@ class ManualExecutionImportService:
                 )
 
         return updated_order
+
+    def _validate_sell_lot_context(
+        self,
+        *,
+        item: ManualExecutionImportItem,
+        order_row,
+        local_filled_qty_before: int,
+    ) -> ManualExecutionImportCandidate | None:
+        if not self._is_lot_level_sell_order(order_row):
+            return None
+
+        if self._entry_lot_repo is None:
+            return self._build_blocked(
+                item=item,
+                order_row=order_row,
+                local_filled_qty_before=local_filled_qty_before,
+                reason_code="ENTRY_LOT_REPOSITORY_MISSING",
+                reason_message=(
+                    "Lot-level sell execution import requires EntryLotRepository."
+                ),
+            )
+        if self._signal_repo is None:
+            return self._build_blocked(
+                item=item,
+                order_row=order_row,
+                local_filled_qty_before=local_filled_qty_before,
+                reason_code="SIGNAL_REPOSITORY_MISSING",
+                reason_message=(
+                    "Lot-level sell execution import requires the sell execution "
+                    "audit signal to identify source_lot_id."
+                ),
+            )
+
+        context = self._resolve_sell_lot_execution_context(order_row)
+        if context is None:
+            return self._build_blocked(
+                item=item,
+                order_row=order_row,
+                local_filled_qty_before=local_filled_qty_before,
+                reason_code="LOT_SELL_AUDIT_NOT_FOUND",
+                reason_message=(
+                    "No sell execution audit signal with source_lot_id was found "
+                    f"for client_order_id={order_row.client_order_id}."
+                ),
+            )
+
+        lot = self._entry_lot_repo.get(context.lot_id)
+        if lot is None or lot.status != "OPEN" or lot.remaining_qty <= 0:
+            return self._build_blocked(
+                item=item,
+                order_row=order_row,
+                local_filled_qty_before=local_filled_qty_before,
+                reason_code="ENTRY_LOT_NOT_OPEN",
+                reason_message=(
+                    "The source lot is missing or no longer open: "
+                    f"lot_id={context.lot_id}"
+                ),
+            )
+        if lot.symbol != order_row.symbol:
+            raise ServiceError(
+                "Lot-level sell import symbol mismatch: "
+                f"order_symbol={order_row.symbol}, lot_symbol={lot.symbol}, "
+                f"lot_id={context.lot_id}"
+            )
+        if item.qty > lot.remaining_qty:
+            return self._build_blocked(
+                item=item,
+                order_row=order_row,
+                local_filled_qty_before=local_filled_qty_before,
+                reason_code="SELL_QTY_EXCEEDS_LOT_REMAINING",
+                reason_message=(
+                    "Imported sell execution qty exceeds current lot remaining_qty: "
+                    f"import_qty={item.qty}, lot_remaining_qty={lot.remaining_qty}, "
+                    f"lot_id={context.lot_id}"
+                ),
+            )
+        return None
+
+    def _resolve_sell_lot_execution_context(self, order_row) -> _SellLotExecutionContext | None:
+        if not self._is_lot_level_sell_order(order_row):
+            return None
+        if self._signal_repo is None:
+            return None
+
+        rows = self._signal_repo.list_by_strategy(
+            _SELL_EXECUTION_AUDIT_STRATEGY,
+            limit=2000,
+        )
+        for row in rows:
+            payload = row.payload or {}
+            if payload.get("client_order_id") != order_row.client_order_id:
+                continue
+            lot_id = payload.get("source_lot_id")
+            if isinstance(lot_id, bool) or not isinstance(lot_id, int) or lot_id <= 0:
+                raise ServiceError(
+                    "Sell execution audit has invalid source_lot_id: "
+                    f"audit_signal_id={row.id}, value={lot_id!r}"
+                )
+            raw_cost_rate = payload.get(
+                "sell_cost_rate",
+                DEFAULT_TIMING2_SELL_COST_RATE,
+            )
+            sell_cost_rate = self._require_non_negative_float(
+                "sell_cost_rate",
+                raw_cost_rate,
+            )
+            return _SellLotExecutionContext(
+                lot_id=lot_id,
+                sell_cost_rate=sell_cost_rate,
+            )
+        return None
+
+    @staticmethod
+    def _is_lot_level_sell_order(order_row) -> bool:
+        return (
+            order_row.side == "sell"
+            and order_row.strategy_name in _LOT_LEVEL_SELL_STRATEGIES
+        )
 
     @staticmethod
     def _project_status(*, order_row, projected_filled_qty: int) -> str:
@@ -352,6 +524,15 @@ class ManualExecutionImportService:
             raise ValueError(
                 f"executed_at must be timezone-aware: {item.executed_at!r}"
             )
+
+    @staticmethod
+    def _require_non_negative_float(name: str, value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a non-negative number: {value!r}")
+        normalized = float(value)
+        if normalized < 0.0:
+            raise ValueError(f"{name} must be a non-negative number: {value!r}")
+        return normalized
 
     @staticmethod
     def _build_blocked(

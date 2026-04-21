@@ -249,11 +249,31 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--timing2-close-high-lookback-days",
         "--timing2-new-high-lookback-days",
+        dest="timing2_close_high_lookback_days",
         type=int,
         default=60,
         help=(
-            "Lookback window for timing2 prior new-high check. Default: 60"
+            "Lookback window for timing2 close-price high check. Default: 60"
+        ),
+    )
+    parser.add_argument(
+        "--timing2-close-gain-rate-threshold",
+        type=float,
+        default=0.15,
+        help=(
+            "Minimum timing2 latest close gain rate versus previous close. "
+            "Default: 0.15"
+        ),
+    )
+    parser.add_argument(
+        "--timing2-volume-multiplier-threshold",
+        type=float,
+        default=5.0,
+        help=(
+            "Minimum timing2 latest volume divided by previous volume. "
+            "Default: 5.0"
         ),
     )
     parser.add_argument(
@@ -466,10 +486,11 @@ def _timing2_setup_scan_result_to_payload(
                     "latest_daily_date": row.match.latest_daily_date,
                     "latest_close": row.match.latest_close,
                     "previous_close": row.match.previous_close,
-                    "official_upper_limit_price": (
-                        row.match.official_upper_limit_price
-                    ),
-                    "prior_lookback_high": row.match.prior_lookback_high,
+                    "latest_volume": row.match.latest_volume,
+                    "previous_volume": row.match.previous_volume,
+                    "close_gain_rate": row.match.close_gain_rate,
+                    "volume_ratio": row.match.volume_ratio,
+                    "lookback_highest_close": row.match.lookback_highest_close,
                     "lookback_start_date": row.match.lookback_start_date,
                     "lookback_end_date": row.match.lookback_end_date,
                 },
@@ -654,7 +675,8 @@ def _print_timing2_setup_scan_result(
                 f"{row.symbol} name={row.name} market={row.market} "
                 f"latest_daily_date={row.match.latest_daily_date} "
                 f"latest_close={row.match.latest_close} "
-                f"upper_limit={row.match.official_upper_limit_price} "
+                f"close_gain_rate={row.match.close_gain_rate:.4f} "
+                f"volume_ratio={row.match.volume_ratio:.4f} "
                 f"already_recorded={row.already_recorded}"
             )
 
@@ -951,7 +973,9 @@ def _run_timing2_setup_scan(
     readiness_result,
     trade_date: str,
     daily_count: int,
-    new_high_lookback_days: int,
+    close_high_lookback_days: int,
+    close_gain_rate_threshold: float,
+    volume_multiplier_threshold: float,
 ) -> Timing2SetupScanExecutionResult:
     if not scan_requested:
         return _build_timing2_setup_not_requested()
@@ -995,7 +1019,9 @@ def _run_timing2_setup_scan(
     ).scan(
         trade_date=trade_date,
         settings=Timing2SetupSettings(
-            new_high_lookback_days=new_high_lookback_days,
+            close_high_lookback_days=close_high_lookback_days,
+            close_gain_rate_threshold=close_gain_rate_threshold,
+            volume_multiplier_threshold=volume_multiplier_threshold,
         ),
         daily_count=daily_count,
         write_signals=write_signals,
@@ -1225,8 +1251,16 @@ def main() -> int:
     _ok("write_timing2_signals", str(args.write_timing2_signals))
     _ok("timing2_daily_count", str(args.timing2_daily_count))
     _ok(
-        "timing2_new_high_lookback_days",
-        str(args.timing2_new_high_lookback_days),
+        "timing2_close_high_lookback_days",
+        str(args.timing2_close_high_lookback_days),
+    )
+    _ok(
+        "timing2_close_gain_rate_threshold",
+        str(args.timing2_close_gain_rate_threshold),
+    )
+    _ok(
+        "timing2_volume_multiplier_threshold",
+        str(args.timing2_volume_multiplier_threshold),
     )
     _ok("db_path", str(db_path))
 
@@ -1357,7 +1391,11 @@ def main() -> int:
                 readiness_result=result,
                 trade_date=args.trade_date,
                 daily_count=args.timing2_daily_count,
-                new_high_lookback_days=args.timing2_new_high_lookback_days,
+                close_high_lookback_days=args.timing2_close_high_lookback_days,
+                close_gain_rate_threshold=args.timing2_close_gain_rate_threshold,
+                volume_multiplier_threshold=(
+                    args.timing2_volume_multiplier_threshold
+                ),
             )
     except Exception as exc:
         _fail("pipeline", f"{type(exc).__name__}: {exc}")

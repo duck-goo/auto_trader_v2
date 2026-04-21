@@ -7,8 +7,6 @@ from datetime import datetime
 
 import pandas as pd
 
-from market import calculate_krx_upper_price_limit
-
 
 def _require_trade_date(value: str) -> str:
     if not isinstance(value, str):
@@ -26,21 +24,39 @@ def _require_positive_int(name: str, value: int) -> int:
     return value
 
 
+def _require_positive_float(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f"{name} must be a positive number: {value!r}")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class Timing2SetupSettings:
-    new_high_lookback_days: int = 60
+    close_high_lookback_days: int = 60
+    close_gain_rate_threshold: float = 0.15
+    volume_multiplier_threshold: float = 5.0
 
     def validated(self) -> "Timing2SetupSettings":
-        new_high_lookback_days = _require_positive_int(
-            "new_high_lookback_days",
-            self.new_high_lookback_days,
+        close_high_lookback_days = _require_positive_int(
+            "close_high_lookback_days",
+            self.close_high_lookback_days,
+        )
+        close_gain_rate_threshold = _require_positive_float(
+            "close_gain_rate_threshold",
+            self.close_gain_rate_threshold,
+        )
+        volume_multiplier_threshold = _require_positive_float(
+            "volume_multiplier_threshold",
+            self.volume_multiplier_threshold,
         )
         return Timing2SetupSettings(
-            new_high_lookback_days=new_high_lookback_days,
+            close_high_lookback_days=close_high_lookback_days,
+            close_gain_rate_threshold=close_gain_rate_threshold,
+            volume_multiplier_threshold=volume_multiplier_threshold,
         )
 
     def min_required_completed_candles(self) -> int:
-        return self.new_high_lookback_days + 1
+        return max(self.close_high_lookback_days, 2)
 
 
 @dataclass(frozen=True)
@@ -51,8 +67,11 @@ class Timing2SetupMatch:
     latest_daily_date: str
     latest_close: int
     previous_close: int
-    official_upper_limit_price: int
-    prior_lookback_high: int
+    latest_volume: int
+    previous_volume: int
+    close_gain_rate: float
+    volume_ratio: float
+    lookback_highest_close: int
     lookback_start_date: str
     lookback_end_date: str
 
@@ -61,11 +80,13 @@ class Timing2SetupEvaluator:
     """
     Evaluate only the daily setup part of buy timing 2.
 
-    Conditions from the project spec:
-    - previous completed daily close must exactly equal the official
-      upper price limit
-    - that close must be a strict new high over the configured lookback
-      window
+    Conditions:
+    - previous completed daily close must be the highest close in the
+      configured lookback window including itself
+    - previous completed daily close must be at least the configured gain
+      threshold versus the day before
+    - previous completed daily volume must be at least the configured
+      multiplier versus the day before
     """
 
     def evaluate(
@@ -102,18 +123,24 @@ class Timing2SetupEvaluator:
         previous_row = completed.iloc[latest_index - 1]
         latest_close = int(round(float(latest_row["close"])))
         previous_close = int(round(float(previous_row["close"])))
-        official_upper_limit_price = calculate_krx_upper_price_limit(
-            market=market,
-            base_price=previous_close,
-        )
+        latest_volume = int(round(float(latest_row["volume"])))
+        previous_volume = int(round(float(previous_row["volume"])))
 
-        if latest_close != official_upper_limit_price:
+        if previous_close <= 0 or previous_volume <= 0:
             return None
 
-        lookback_start = latest_index - normalized_settings.new_high_lookback_days
-        prior_window = completed.iloc[lookback_start:latest_index]
-        prior_lookback_high = int(round(float(prior_window["high"].max())))
-        if latest_close <= prior_lookback_high:
+        lookback_start = latest_index - normalized_settings.close_high_lookback_days + 1
+        lookback_window = completed.iloc[lookback_start : latest_index + 1]
+        lookback_highest_close = int(round(float(lookback_window["close"].max())))
+        if latest_close < lookback_highest_close:
+            return None
+
+        close_gain_rate = (latest_close / previous_close) - 1.0
+        if close_gain_rate < normalized_settings.close_gain_rate_threshold:
+            return None
+
+        volume_ratio = latest_volume / previous_volume
+        if volume_ratio < normalized_settings.volume_multiplier_threshold:
             return None
 
         return Timing2SetupMatch(
@@ -123,10 +150,13 @@ class Timing2SetupEvaluator:
             latest_daily_date=str(latest_row["date_text"]),
             latest_close=latest_close,
             previous_close=previous_close,
-            official_upper_limit_price=official_upper_limit_price,
-            prior_lookback_high=prior_lookback_high,
-            lookback_start_date=str(prior_window.iloc[0]["date_text"]),
-            lookback_end_date=str(prior_window.iloc[-1]["date_text"]),
+            latest_volume=latest_volume,
+            previous_volume=previous_volume,
+            close_gain_rate=float(close_gain_rate),
+            volume_ratio=float(volume_ratio),
+            lookback_highest_close=lookback_highest_close,
+            lookback_start_date=str(lookback_window.iloc[0]["date_text"]),
+            lookback_end_date=str(lookback_window.iloc[-1]["date_text"]),
         )
 
     def _normalize_completed_rows(
@@ -140,7 +170,7 @@ class Timing2SetupEvaluator:
                 f"daily_candles must be a DataFrame: {type(daily_candles).__name__}"
             )
 
-        required_columns = {"datetime", "high", "close"}
+        required_columns = {"datetime", "close", "volume"}
         missing_columns = required_columns - set(daily_candles.columns)
         if missing_columns:
             raise ValueError(
@@ -154,12 +184,12 @@ class Timing2SetupEvaluator:
                 normalized["datetime"],
                 errors="raise",
             )
-            normalized.loc[:, "high"] = pd.to_numeric(
-                normalized["high"],
-                errors="raise",
-            )
             normalized.loc[:, "close"] = pd.to_numeric(
                 normalized["close"],
+                errors="raise",
+            )
+            normalized.loc[:, "volume"] = pd.to_numeric(
+                normalized["volume"],
                 errors="raise",
             )
         except Exception as exc:

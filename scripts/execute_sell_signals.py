@@ -37,6 +37,8 @@ from services import (
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    DailyStatsRepository,
+    EntryLotRepository,
     OrderRepository,
     PositionRepository,
     RuntimeLockRepository,
@@ -205,6 +207,10 @@ def _build_payload(
                 "symbol": item.symbol,
                 "name": item.name,
                 "source_strategy_name": item.source_strategy_name,
+                "lot_id": item.lot_id,
+                "requested_sell_qty": item.requested_sell_qty,
+                "order_qty": item.order_qty,
+                "sell_cost_rate": item.sell_cost_rate,
                 "outcome": item.outcome.value,
                 "reason_code": item.reason_code,
                 "reason_message": item.reason_message,
@@ -319,6 +325,8 @@ def main() -> int:
             signal_repo = SignalRepository(conn)
             order_repo = OrderRepository(conn)
             position_repo = PositionRepository(conn)
+            entry_lot_repo = EntryLotRepository(conn)
+            daily_stats_repo = DailyStatsRepository(conn)
             trading_control_repo = TradingControlRepository(conn)
             order_service = OrderService(
                 broker=broker,
@@ -333,9 +341,11 @@ def main() -> int:
                 order_repo=order_repo,
                 position_repo=position_repo,
                 order_service=order_service,
+                entry_lot_repo=entry_lot_repo,
                 risk_guard_service=TradingRiskGuardService(
                     order_repo=order_repo,
                     trading_control_repo=trading_control_repo,
+                    daily_stats_repo=daily_stats_repo,
                 ),
             )
             result = service.execute_pending_signals(
@@ -365,7 +375,8 @@ def main() -> int:
                 print(
                     f"{item.symbol} strategy={item.source_strategy_name} "
                     f"outcome={item.outcome.value} "
-                    f"qty={item.position_qty} price={item.current_price} "
+                    f"qty={item.order_qty or item.position_qty} "
+                    f"lot_id={item.lot_id or '-'} price={item.current_price} "
                     f"reason={item.reason_code or '-'} "
                     f"client_order_id={item.client_order_id or '-'}"
                 )

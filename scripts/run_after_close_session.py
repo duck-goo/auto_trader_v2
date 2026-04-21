@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -414,6 +415,7 @@ def main() -> int:
     steps: list[dict[str, Any]] = []
     session_outcome = "UNKNOWN"
     session_reason: str | None = None
+    lock_conn: sqlite3.Connection | None = None
     lock_service: RuntimeLockService | None = None
     lock_acquired = False
     lock_was_acquired = False
@@ -423,27 +425,27 @@ def main() -> int:
     try:
         if args.write:
             run_migrations(db_path)
-            conn = get_connection(
+            lock_conn = get_connection(
                 db_path,
                 busy_timeout_ms=settings.db_busy_timeout_ms,
             )
-            try:
-                lock_service = RuntimeLockService(
-                    conn=conn,
-                    lock_repo=RuntimeLockRepository(conn),
-                )
-                lock_owner_id = lock_service.owner_id
-                lock_service.acquire(
-                    lock_name=lock_name,
-                    lease_seconds=args.lock_lease_seconds,
-                )
-                lock_acquired = True
-                lock_was_acquired = True
-            finally:
-                conn.close()
+            lock_service = RuntimeLockService(
+                conn=lock_conn,
+                lock_repo=RuntimeLockRepository(lock_conn),
+            )
+            lock_owner_id = lock_service.owner_id
+            lock_service.acquire(
+                lock_name=lock_name,
+                lease_seconds=args.lock_lease_seconds,
+            )
+            lock_acquired = True
+            lock_was_acquired = True
     except RuntimeLockBusyError as exc:
         session_outcome = "LOCK_BUSY"
         session_reason = str(exc)
+        if lock_conn is not None:
+            lock_conn.close()
+            lock_conn = None
         _fail("runtime lock", session_reason)
         if output_path is not None:
             _save_json(
@@ -466,6 +468,9 @@ def main() -> int:
     except Exception as exc:
         session_outcome = "LOCK_FAILED"
         session_reason = f"{type(exc).__name__}: {exc}"
+        if lock_conn is not None:
+            lock_conn.close()
+            lock_conn = None
         _fail("lock", session_reason)
         return 5
 
@@ -605,10 +610,12 @@ def main() -> int:
     finally:
         if lock_acquired and lock_service is not None:
             try:
-                lock_service.release(lock_name=lock_name)
-                lock_released = True
+                lock_released = lock_service.release(lock_name=lock_name)
             finally:
                 lock_acquired = False
+        if lock_conn is not None:
+            lock_conn.close()
+            lock_conn = None
 
     for step in steps:
         _print_step(step)

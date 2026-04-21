@@ -234,8 +234,11 @@ class Timing2SetupScanService:
             "latest_daily_date": match.latest_daily_date,
             "latest_close": match.latest_close,
             "previous_close": match.previous_close,
-            "official_upper_limit_price": match.official_upper_limit_price,
-            "prior_lookback_high": match.prior_lookback_high,
+            "latest_volume": match.latest_volume,
+            "previous_volume": match.previous_volume,
+            "close_gain_rate": match.close_gain_rate,
+            "volume_ratio": match.volume_ratio,
+            "lookback_highest_close": match.lookback_highest_close,
             "lookback_start_date": match.lookback_start_date,
             "lookback_end_date": match.lookback_end_date,
         }

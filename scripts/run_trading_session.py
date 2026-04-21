@@ -37,6 +37,7 @@ from services import RuntimeLockBusyError, RuntimeLockService
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import RuntimeLockRepository
+from strategy import DEFAULT_TIMING2_SELL_COST_RATE
 
 KST = pytz.timezone("Asia/Seoul")
 DEFAULT_POLLING_LOCK_PREFIX = "intraday_trading_polling"
@@ -208,6 +209,12 @@ def _parse_args() -> argparse.Namespace:
         help="Optional max total order count for the trade date. New buys are blocked once reached.",
     )
     parser.add_argument(
+        "--max-daily-loss",
+        type=int,
+        default=None,
+        help="Optional max realized daily loss in KRW. New buys are blocked once reached.",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=300,
@@ -266,6 +273,33 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=300,
         help="Persisted 15m bar history limit for sell MACD scan. Default: 300",
+    )
+    parser.add_argument(
+        "--timing2-lot-stop-loss-percent",
+        type=float,
+        default=1.5,
+        help="Timing2 lot stop-loss percent after sell costs. Default: 1.5",
+    )
+    parser.add_argument(
+        "--timing2-lot-take-profit-percent",
+        type=float,
+        default=5.0,
+        help="Timing2 lot partial take-profit percent. Default: 5.0",
+    )
+    parser.add_argument(
+        "--timing2-lot-partial-take-profit-percent",
+        type=float,
+        default=50.0,
+        help="Timing2 lot partial take-profit sell ratio percent. Default: 50.0",
+    )
+    parser.add_argument(
+        "--timing2-lot-sell-cost-rate",
+        type=float,
+        default=DEFAULT_TIMING2_SELL_COST_RATE,
+        help=(
+            "Timing2 lot combined sell fee/tax ratio. "
+            f"Default: {DEFAULT_TIMING2_SELL_COST_RATE}"
+        ),
     )
     parser.add_argument(
         "--buy-start-time",
@@ -526,6 +560,14 @@ def _build_polling_command(
         str(args.sell_macd_consecutive_decline_bars),
         "--sell-macd-history-limit",
         str(args.sell_macd_history_limit),
+        "--timing2-lot-stop-loss-percent",
+        str(args.timing2_lot_stop_loss_percent),
+        "--timing2-lot-take-profit-percent",
+        str(args.timing2_lot_take_profit_percent),
+        "--timing2-lot-partial-take-profit-percent",
+        str(args.timing2_lot_partial_take_profit_percent),
+        "--timing2-lot-sell-cost-rate",
+        str(args.timing2_lot_sell_cost_rate),
         "--buy-start-time",
         args.buy_start_time,
         "--buy-cutoff-time",
@@ -562,6 +604,13 @@ def _build_polling_command(
             [
                 "--max-daily-order-count",
                 str(args.max_daily_order_count),
+            ]
+        )
+    if args.max_daily_loss is not None:
+        command.extend(
+            [
+                "--max-daily-loss",
+                str(args.max_daily_loss),
             ]
         )
     if args.scan_timing1:
@@ -694,6 +743,8 @@ def main() -> int:
         )
         _validate_positive_int("per_order_budget", args.per_order_budget)
         _validate_positive_int("max_holdings", args.max_holdings)
+        if args.max_daily_loss is not None:
+            _validate_positive_int("max_daily_loss", args.max_daily_loss)
         _validate_positive_int("timeout_seconds", args.timeout_seconds)
         _validate_positive_int("buy_signal_limit", args.buy_signal_limit)
         _validate_positive_int("sell_signal_limit", args.sell_signal_limit)
@@ -751,6 +802,14 @@ def main() -> int:
     _ok("execute", str(args.execute))
     _ok("db_path", str(db_path))
     _ok("polling_lock_name", polling_lock_name)
+    _ok(
+        "max_daily_order_count",
+        "-" if args.max_daily_order_count is None else str(args.max_daily_order_count),
+    )
+    _ok(
+        "max_daily_loss",
+        "-" if args.max_daily_loss is None else str(args.max_daily_loss),
+    )
     if not args.execute:
         _warn(
             "session_note",

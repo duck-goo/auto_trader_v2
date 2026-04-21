@@ -189,6 +189,148 @@ def test_recompute_counts_fills_within_day(conn):
     assert row.fill_count == 2   # E1, E2 on DAY; E3 on NEXT_DAY
 
 
+def test_recompute_realized_pnl_uses_fifo_within_same_day(conn):
+    order_repo = OrderRepository(conn)
+    exec_repo = ExecutionRepository(conn)
+    stats_repo = DailyStatsRepository(conn)
+
+    with transaction(conn):
+        buy_order = _create_order(
+            order_repo,
+            coid="COID_FIFO_BUY",
+            qty=10,
+            requested_at=T_0900,
+        )
+        order_repo.mark_submitted(
+            client_order_id=buy_order.client_order_id,
+            kis_order_no="KIS_FIFO_BUY",
+            submitted_at=T_0901,
+        )
+        exec_repo.insert_if_new(
+            order_id=buy_order.id,
+            kis_exec_no="FIFO_BUY_1",
+            symbol="005930",
+            side="buy",
+            qty=5,
+            price=70_000,
+            executed_at=T_0901,
+        )
+        exec_repo.insert_if_new(
+            order_id=buy_order.id,
+            kis_exec_no="FIFO_BUY_2",
+            symbol="005930",
+            side="buy",
+            qty=5,
+            price=71_000,
+            executed_at=T_0902,
+        )
+        order_repo.mark_filled(
+            client_order_id=buy_order.client_order_id,
+            closed_at=T_1000,
+        )
+
+        sell_order = _create_order(
+            order_repo,
+            coid="COID_FIFO_SELL",
+            side="sell",
+            qty=4,
+            price=72_000,
+            requested_at=T_1000,
+        )
+        order_repo.mark_submitted(
+            client_order_id=sell_order.client_order_id,
+            kis_order_no="KIS_FIFO_SELL",
+            submitted_at=T_1000,
+        )
+        exec_repo.insert_if_new(
+            order_id=sell_order.id,
+            kis_exec_no="FIFO_SELL_1",
+            symbol="005930",
+            side="sell",
+            qty=4,
+            price=72_000,
+            executed_at=T_1500,
+        )
+        order_repo.mark_filled(
+            client_order_id=sell_order.client_order_id,
+            closed_at=T_1500,
+        )
+
+    with transaction(conn):
+        row = stats_repo.recompute_day(DAY)
+
+    assert row.realized_pnl == 8_000
+
+
+def test_recompute_realized_pnl_uses_prior_day_buy_lot_cost_basis(conn):
+    order_repo = OrderRepository(conn)
+    exec_repo = ExecutionRepository(conn)
+    stats_repo = DailyStatsRepository(conn)
+
+    prev_day_requested = "2026-04-12T15:00:00+09:00"
+    prev_day_submitted = "2026-04-12T15:00:01+09:00"
+    prev_day_executed = "2026-04-12T15:01:00+09:00"
+
+    with transaction(conn):
+        buy_order = _create_order(
+            order_repo,
+            coid="COID_PREV_BUY",
+            qty=3,
+            price=100_000,
+            requested_at=prev_day_requested,
+        )
+        order_repo.mark_submitted(
+            client_order_id=buy_order.client_order_id,
+            kis_order_no="KIS_PREV_BUY",
+            submitted_at=prev_day_submitted,
+        )
+        exec_repo.insert_if_new(
+            order_id=buy_order.id,
+            kis_exec_no="PREV_BUY_EXEC",
+            symbol="005930",
+            side="buy",
+            qty=3,
+            price=100_000,
+            executed_at=prev_day_executed,
+        )
+        order_repo.mark_filled(
+            client_order_id=buy_order.client_order_id,
+            closed_at=prev_day_executed,
+        )
+
+        sell_order = _create_order(
+            order_repo,
+            coid="COID_CURR_SELL",
+            side="sell",
+            qty=2,
+            price=95_000,
+            requested_at=T_0900,
+        )
+        order_repo.mark_submitted(
+            client_order_id=sell_order.client_order_id,
+            kis_order_no="KIS_CURR_SELL",
+            submitted_at=T_0901,
+        )
+        exec_repo.insert_if_new(
+            order_id=sell_order.id,
+            kis_exec_no="CURR_SELL_EXEC",
+            symbol="005930",
+            side="sell",
+            qty=2,
+            price=95_000,
+            executed_at=T_1000,
+        )
+        order_repo.mark_filled(
+            client_order_id=sell_order.client_order_id,
+            closed_at=T_1000,
+        )
+
+    with transaction(conn):
+        row = stats_repo.recompute_day(DAY)
+
+    assert row.realized_pnl == -10_000
+
+
 # ---------------------------------------------------------------------
 # UPSERT idempotency
 # ---------------------------------------------------------------------

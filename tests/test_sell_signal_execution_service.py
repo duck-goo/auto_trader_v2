@@ -17,13 +17,17 @@ from services import (
     SellSignalExecutionSettings,
     STRATEGY_NAME_SELL_STOP_LOSS,
     STRATEGY_NAME_SELL_TAKE_PROFIT,
+    STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+    STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
     TradingRiskGuardService,
 )
 from services.sell_signal_execution_service import STRATEGY_NAME_SELL_EXECUTION_AUDIT
 from storage.db import get_connection, transaction
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    DailyStatsRepository,
     DbOrderStatus,
+    EntryLotRepository,
     OrderRepository,
     OrderRow,
     PositionRepository,
@@ -103,17 +107,21 @@ def _record_sell_signal(
     strategy_name: str,
     symbol: str,
     signal_at: str,
+    payload_extra: dict | None = None,
 ) -> int:
+    payload = {
+        "trade_date": TRADE_DATE,
+        "symbol": symbol,
+        "name": f"Name-{symbol}",
+    }
+    if payload_extra:
+        payload.update(payload_extra)
     with transaction(conn):
         row = signal_repo.record(
             symbol=symbol,
             strategy_name=strategy_name,
             scanned_at=signal_at,
-            payload={
-                "trade_date": TRADE_DATE,
-                "symbol": symbol,
-                "name": f"Name-{symbol}",
-            },
+            payload=payload,
         )
     return row.id
 
@@ -126,6 +134,7 @@ def _make_service(
     position_repo: PositionRepository,
     broker: MagicMock,
     order_service: MagicMock,
+    entry_lot_repo: EntryLotRepository | None = None,
 ) -> SellSignalExecutionService:
     return SellSignalExecutionService(
         broker=broker,
@@ -134,13 +143,51 @@ def _make_service(
         order_repo=order_repo,
         position_repo=position_repo,
         order_service=order_service,
+        entry_lot_repo=entry_lot_repo,
         risk_guard_service=TradingRiskGuardService(
             order_repo=order_repo,
             trading_control_repo=TradingControlRepository(conn),
+            daily_stats_repo=DailyStatsRepository(conn),
             now_fn=_fixed_now,
         ),
         now_fn=_fixed_now,
     )
+
+
+def _create_timing2_lot(
+    conn,
+    order_repo: OrderRepository,
+    *,
+    symbol: str,
+    qty: int,
+    price: int,
+) -> int:
+    lot_repo = EntryLotRepository(conn)
+    with transaction(conn):
+        order = order_repo.create(
+            client_order_id=f"BUY-{symbol}-{qty}-{price}",
+            symbol=symbol,
+            side="buy",
+            qty=qty,
+            price=0,
+            order_type="MARKET",
+            strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+            requested_at="2026-04-17T09:00:00+09:00",
+        )
+        order_repo.mark_submitted(
+            client_order_id=order.client_order_id,
+            kis_order_no=f"KIS-BUY-{symbol}",
+            submitted_at="2026-04-17T09:00:01+09:00",
+        )
+        lot = lot_repo.apply_buy_execution(
+            entry_order_id=order.id,
+            symbol=symbol,
+            qty=qty,
+            price=price,
+            executed_at="2026-04-17T09:01:00+09:00",
+            entry_strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+        )
+    return lot.id
 
 
 def _settings() -> SellSignalExecutionSettings:
@@ -405,5 +452,162 @@ def test_preview_blocks_when_kill_switch_enabled(test_db_path):
         blocked = result.candidates[0]
         assert blocked.reason_code == "KILL_SWITCH_ENABLED"
         broker.get_current_price.assert_not_called()
+    finally:
+        conn.close()
+
+
+def test_execute_lot_signal_uses_payload_sell_qty_not_full_position(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+        entry_lot_repo = EntryLotRepository(conn)
+
+        with transaction(conn):
+            position_repo.upsert_from_broker(
+                symbol="005930",
+                qty=5,
+                avg_price=10_000,
+                updated_at="2026-04-17T09:00:00+09:00",
+            )
+        lot_id = _create_timing2_lot(
+            conn,
+            order_repo,
+            symbol="005930",
+            qty=5,
+            price=10_000,
+        )
+        signal_id = _record_sell_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+            symbol="005930",
+            signal_at="2026-04-17T10:07:00+09:00",
+            payload_extra={
+                "lot_id": lot_id,
+                "sell_qty": 3,
+                "sell_cost_rate": 0.002140527,
+            },
+        )
+
+        broker = MagicMock()
+        broker.get_current_price.return_value = _make_price_snapshot("005930", 10_500)
+        order_service = MagicMock(spec=OrderService)
+        order_service.place_order.return_value = _make_order_result("005930", qty=3)
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+            entry_lot_repo=entry_lot_repo,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=True,
+        )
+
+        assert result.submitted_count == 1
+        assert result.acted_count == 1
+        assert result.candidates[0].lot_id == lot_id
+        assert result.candidates[0].position_qty == 5
+        assert result.candidates[0].requested_sell_qty == 3
+        assert result.candidates[0].order_qty == 3
+        assert result.candidates[0].sell_cost_rate == 0.002140527
+        assert signal_repo.get(signal_id).acted is True
+
+        order_service.place_order.assert_called_once()
+        _, kwargs = order_service.place_order.call_args
+        assert kwargs["side"] == "sell"
+        assert kwargs["qty"] == 3
+
+        audit_rows = signal_repo.list_by_strategy(
+            STRATEGY_NAME_SELL_EXECUTION_AUDIT,
+            limit=10,
+        )
+        assert audit_rows[0].payload["source_lot_id"] == lot_id
+        assert audit_rows[0].payload["requested_sell_qty"] == 3
+        assert audit_rows[0].payload["order_qty"] == 3
+        assert audit_rows[0].payload["sell_cost_rate"] == 0.002140527
+    finally:
+        conn.close()
+
+
+def test_execute_keeps_lot_signal_pending_when_blocked_by_unresolved_sell(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+        entry_lot_repo = EntryLotRepository(conn)
+
+        with transaction(conn):
+            position_repo.upsert_from_broker(
+                symbol="005930",
+                qty=5,
+                avg_price=10_000,
+                updated_at="2026-04-17T09:00:00+09:00",
+            )
+            order_repo.create(
+                client_order_id="EXISTING-SELL-005930",
+                symbol="005930",
+                side="sell",
+                qty=1,
+                price=0,
+                order_type="MARKET",
+                strategy_name="seed_sell",
+                requested_at="2026-04-17T10:00:00+09:00",
+            )
+        lot_id = _create_timing2_lot(
+            conn,
+            order_repo,
+            symbol="005930",
+            qty=5,
+            price=10_000,
+        )
+        signal_id = _record_sell_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+            symbol="005930",
+            signal_at="2026-04-17T10:07:00+09:00",
+            payload_extra={
+                "lot_id": lot_id,
+                "sell_qty": 3,
+                "sell_cost_rate": 0.002140527,
+            },
+        )
+
+        broker = MagicMock()
+        order_service = MagicMock(spec=OrderService)
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+            entry_lot_repo=entry_lot_repo,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=True,
+        )
+
+        assert result.blocked_count == 1
+        assert result.acted_count == 0
+        assert result.audit_record_count == 0
+        assert result.candidates[0].reason_code == "UNRESOLVED_SELL_ORDER_EXISTS"
+        assert signal_repo.get(signal_id).acted is False
+        order_service.place_order.assert_not_called()
     finally:
         conn.close()

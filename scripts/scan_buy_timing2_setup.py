@@ -73,10 +73,24 @@ def _parse_args() -> argparse.Namespace:
         help="How many daily candles to request per symbol. Default: 90",
     )
     parser.add_argument(
+        "--close-high-lookback-days",
         "--new-high-lookback-days",
+        dest="close_high_lookback_days",
         type=int,
         default=60,
-        help="Lookback window for prior new-high check. Default: 60",
+        help="Lookback window for close-price high check. Default: 60",
+    )
+    parser.add_argument(
+        "--close-gain-rate-threshold",
+        type=float,
+        default=0.15,
+        help="Minimum latest close gain rate versus previous close. Default: 0.15",
+    )
+    parser.add_argument(
+        "--volume-multiplier-threshold",
+        type=float,
+        default=5.0,
+        help="Minimum latest volume divided by previous volume. Default: 5.0",
     )
     parser.add_argument(
         "--write",
@@ -129,14 +143,18 @@ def main() -> int:
     output_path = _resolve_path(args.output) if args.output else None
 
     strategy_settings = Timing2SetupSettings(
-        new_high_lookback_days=args.new_high_lookback_days,
+        close_high_lookback_days=args.close_high_lookback_days,
+        close_gain_rate_threshold=args.close_gain_rate_threshold,
+        volume_multiplier_threshold=args.volume_multiplier_threshold,
     )
 
     _section("Scan Buy Timing2 Setup")
     _ok("mode", settings.mode)
     _ok("trade_date", args.trade_date)
     _ok("daily_count", str(args.daily_count))
-    _ok("new_high_lookback_days", str(args.new_high_lookback_days))
+    _ok("close_high_lookback_days", str(args.close_high_lookback_days))
+    _ok("close_gain_rate_threshold", str(args.close_gain_rate_threshold))
+    _ok("volume_multiplier_threshold", str(args.volume_multiplier_threshold))
     _ok("write", str(args.write))
     _ok("db_path", str(db_path))
 
@@ -180,8 +198,9 @@ def main() -> int:
                     f"{candidate.symbol} name={candidate.name} "
                     f"latest_daily_date={candidate.match.latest_daily_date} "
                     f"latest_close={candidate.match.latest_close} "
-                    f"upper_limit={candidate.match.official_upper_limit_price} "
-                    f"prior_lookback_high={candidate.match.prior_lookback_high} "
+                    f"close_gain_rate={candidate.match.close_gain_rate:.4f} "
+                    f"volume_ratio={candidate.match.volume_ratio:.4f} "
+                    f"lookback_highest_close={candidate.match.lookback_highest_close} "
                     f"already_recorded={candidate.already_recorded}"
                 )
         else:
@@ -205,10 +224,11 @@ def main() -> int:
                         "latest_daily_date": candidate.match.latest_daily_date,
                         "latest_close": candidate.match.latest_close,
                         "previous_close": candidate.match.previous_close,
-                        "official_upper_limit_price": (
-                            candidate.match.official_upper_limit_price
-                        ),
-                        "prior_lookback_high": candidate.match.prior_lookback_high,
+                        "latest_volume": candidate.match.latest_volume,
+                        "previous_volume": candidate.match.previous_volume,
+                        "close_gain_rate": candidate.match.close_gain_rate,
+                        "volume_ratio": candidate.match.volume_ratio,
+                        "lookback_highest_close": candidate.match.lookback_highest_close,
                         "lookback_start_date": candidate.match.lookback_start_date,
                         "lookback_end_date": candidate.match.lookback_end_date,
                     }

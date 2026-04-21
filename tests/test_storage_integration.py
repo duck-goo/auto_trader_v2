@@ -204,7 +204,7 @@ def test_trading_day_scenario(conn):
     assert stats.order_count == 3
     assert stats.fill_count == 3     # EA1, EA2, EC1
     assert stats.error_count == 1    # COID_B rejected
-    assert stats.realized_pnl == 0   # FIFO not yet implemented
+    assert stats.realized_pnl == 8_000
 
 
 def test_sell_more_than_held_aborts_transaction(conn):

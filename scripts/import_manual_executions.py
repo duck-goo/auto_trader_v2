@@ -41,10 +41,12 @@ from services import (
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    EntryLotRepository,
     ExecutionRepository,
     OrderRepository,
     PositionRepository,
     RuntimeLockRepository,
+    SignalRepository,
 )
 
 
@@ -301,6 +303,8 @@ def main() -> int:
             order_repo=OrderRepository(conn),
             execution_repo=ExecutionRepository(conn),
             position_repo=PositionRepository(conn),
+            entry_lot_repo=EntryLotRepository(conn),
+            signal_repo=SignalRepository(conn),
         )
         result = service.import_items(
             items=items,

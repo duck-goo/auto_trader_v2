@@ -24,10 +24,12 @@ from services.sell_signal_execution_service import (
     SellSignalExecutionSettings,
 )
 from services.stale_buy_order_cancel_service import StaleBuyOrderCancelSettings
+from services.timing2_lot_exit_scan_service import Timing2LotExitScanService
 from strategy import (
     SellExitSettings,
     SellMacdExitSettings,
     Timing1IntradayTriggerSettings,
+    Timing2LotExitSettings,
     Timing2IntradayTriggerSettings,
 )
 
@@ -48,6 +50,7 @@ class IntradayTradingCycleResult:
     intraday_bar_refresh: IntradayTradingCycleStepStatus
     sell_exit_scan: IntradayTradingCycleStepStatus
     sell_macd_scan: IntradayTradingCycleStepStatus
+    timing2_lot_exit_scan: IntradayTradingCycleStepStatus
     sell_execution: IntradayTradingCycleStepStatus
     buy_trigger_scan: IntradayTradingCycleStepStatus
     buy_execution: IntradayTradingCycleStepStatus
@@ -63,6 +66,7 @@ class IntradayTradingCycleService:
         intraday_bar_refresh_service: IntradayBar15mRefreshService,
         sell_exit_scan_service: SellExitScanService,
         sell_macd_scan_service: SellMacdExitScanService,
+        timing2_lot_exit_scan_service: Timing2LotExitScanService,
         sell_signal_execution_service: SellSignalExecutionService,
         buy_trigger_scan_service: IntradayTriggerCombinedScanService,
         buy_signal_execution_service: BuySignalExecutionService,
@@ -71,6 +75,7 @@ class IntradayTradingCycleService:
         self._intraday_bar_refresh_service = intraday_bar_refresh_service
         self._sell_exit_scan_service = sell_exit_scan_service
         self._sell_macd_scan_service = sell_macd_scan_service
+        self._timing2_lot_exit_scan_service = timing2_lot_exit_scan_service
         self._sell_signal_execution_service = sell_signal_execution_service
         self._buy_trigger_scan_service = buy_trigger_scan_service
         self._buy_signal_execution_service = buy_signal_execution_service
@@ -84,6 +89,7 @@ class IntradayTradingCycleService:
         sell_exit_settings: SellExitSettings,
         sell_macd_settings: SellMacdExitSettings,
         sell_macd_history_limit: int,
+        timing2_lot_exit_settings: Timing2LotExitSettings,
         sell_execution_settings: SellSignalExecutionSettings,
         sell_signal_limit: int,
         run_timing1: bool,
@@ -127,6 +133,11 @@ class IntradayTradingCycleService:
             write_signals=allow_signal_writes,
             intraday_bar_refresh_status=intraday_bar_refresh_status,
         )
+        timing2_lot_exit_scan_status = self._run_timing2_lot_exit_scan(
+            trade_date=trade_date,
+            settings=timing2_lot_exit_settings,
+            write_signals=allow_signal_writes,
+        )
         sell_execution_status = self._run_sell_execution(
             trade_date=trade_date,
             settings=sell_execution_settings,
@@ -134,6 +145,7 @@ class IntradayTradingCycleService:
             execute_actions=execute_actions,
             maintenance_status=maintenance_status,
             sell_exit_scan_status=sell_exit_scan_status,
+            timing2_lot_exit_scan_status=timing2_lot_exit_scan_status,
         )
 
         buy_trigger_scan_status = self._run_buy_trigger_scan(
@@ -153,6 +165,7 @@ class IntradayTradingCycleService:
             maintenance_status=maintenance_status,
             sell_exit_scan_status=sell_exit_scan_status,
             sell_macd_scan_status=sell_macd_scan_status,
+            timing2_lot_exit_scan_status=timing2_lot_exit_scan_status,
             sell_execution_status=sell_execution_status,
             buy_trigger_scan_status=buy_trigger_scan_status,
         )
@@ -165,6 +178,7 @@ class IntradayTradingCycleService:
             intraday_bar_refresh=intraday_bar_refresh_status,
             sell_exit_scan=sell_exit_scan_status,
             sell_macd_scan=sell_macd_scan_status,
+            timing2_lot_exit_scan=timing2_lot_exit_scan_status,
             sell_execution=sell_execution_status,
             buy_trigger_scan=buy_trigger_scan_status,
             buy_execution=buy_execution_status,
@@ -182,6 +196,23 @@ class IntradayTradingCycleService:
                 trade_date=trade_date,
                 stale_cancel_settings=maintenance_settings,
                 execute_changes=execute_actions,
+            )
+        except Exception as exc:
+            return self._failed(exc)
+        return self._completed(result)
+
+    def _run_timing2_lot_exit_scan(
+        self,
+        *,
+        trade_date: str,
+        settings: Timing2LotExitSettings,
+        write_signals: bool,
+    ) -> IntradayTradingCycleStepStatus:
+        try:
+            result = self._timing2_lot_exit_scan_service.scan(
+                trade_date=trade_date,
+                settings=settings,
+                write_signals=write_signals,
             )
         except Exception as exc:
             return self._failed(exc)
@@ -266,6 +297,7 @@ class IntradayTradingCycleService:
         execute_actions: bool,
         maintenance_status: IntradayTradingCycleStepStatus,
         sell_exit_scan_status: IntradayTradingCycleStepStatus,
+        timing2_lot_exit_scan_status: IntradayTradingCycleStepStatus,
     ) -> IntradayTradingCycleStepStatus:
         if execute_actions and maintenance_status.outcome == "FAILED":
             return self._skipped(
@@ -274,6 +306,10 @@ class IntradayTradingCycleService:
         if sell_exit_scan_status.outcome == "FAILED":
             return self._skipped(
                 "Skipped because sell stop-loss/take-profit scan failed."
+            )
+        if timing2_lot_exit_scan_status.outcome == "FAILED":
+            return self._skipped(
+                "Skipped because Timing2 lot-level sell scan failed."
             )
 
         try:
@@ -327,6 +363,7 @@ class IntradayTradingCycleService:
         maintenance_status: IntradayTradingCycleStepStatus,
         sell_exit_scan_status: IntradayTradingCycleStepStatus,
         sell_macd_scan_status: IntradayTradingCycleStepStatus,
+        timing2_lot_exit_scan_status: IntradayTradingCycleStepStatus,
         sell_execution_status: IntradayTradingCycleStepStatus,
         buy_trigger_scan_status: IntradayTradingCycleStepStatus,
     ) -> IntradayTradingCycleStepStatus:
@@ -340,6 +377,10 @@ class IntradayTradingCycleService:
             )
         if execute_actions and sell_macd_scan_status.outcome == "FAILED":
             return self._skipped("Skipped because sell MACD scan failed.")
+        if execute_actions and timing2_lot_exit_scan_status.outcome == "FAILED":
+            return self._skipped(
+                "Skipped because Timing2 lot-level sell scan failed."
+            )
         if execute_actions and sell_execution_status.outcome == "FAILED":
             return self._skipped(
                 "Skipped because sell execution step failed in this cycle."

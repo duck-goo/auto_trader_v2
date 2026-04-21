@@ -44,14 +44,18 @@ from services import (
     StaleBuyOrderCancelService,
     StaleBuyOrderCancelSettings,
     StaleSellOrderCancelService,
+    Timing2LotExitScanService,
     TradingRiskGuardService,
     UnresolvedOrderSyncService,
 )
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    DailyStatsRepository,
+    EntryLotRepository,
     ExecutionRepository,
     IntradayBar15mRepository,
+    IntradayBar30sRepository,
     OrderRepository,
     PositionRepository,
     RuntimeLockRepository,
@@ -59,9 +63,11 @@ from storage.repositories import (
     TradingControlRepository,
 )
 from strategy import (
+    DEFAULT_TIMING2_SELL_COST_RATE,
     SellExitSettings,
     SellMacdExitSettings,
     Timing1IntradayTriggerSettings,
+    Timing2LotExitSettings,
     Timing2IntradayTriggerSettings,
 )
 
@@ -125,6 +131,12 @@ def _parse_args() -> argparse.Namespace:
         help="Optional max total order count for the trade date. New buys are blocked once reached.",
     )
     parser.add_argument(
+        "--max-daily-loss",
+        type=int,
+        default=None,
+        help="Optional max realized daily loss in KRW. New buys are blocked once reached.",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=300,
@@ -183,6 +195,33 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=300,
         help="Persisted 15m bar history limit for sell MACD scan. Default: 300",
+    )
+    parser.add_argument(
+        "--timing2-lot-stop-loss-percent",
+        type=float,
+        default=1.5,
+        help="Timing2 lot stop-loss percent after sell costs. Default: 1.5",
+    )
+    parser.add_argument(
+        "--timing2-lot-take-profit-percent",
+        type=float,
+        default=5.0,
+        help="Timing2 lot partial take-profit percent. Default: 5.0",
+    )
+    parser.add_argument(
+        "--timing2-lot-partial-take-profit-percent",
+        type=float,
+        default=50.0,
+        help="Timing2 lot partial take-profit sell ratio percent. Default: 50.0",
+    )
+    parser.add_argument(
+        "--timing2-lot-sell-cost-rate",
+        type=float,
+        default=DEFAULT_TIMING2_SELL_COST_RATE,
+        help=(
+            "Timing2 lot combined sell fee/tax ratio. "
+            f"Default: {DEFAULT_TIMING2_SELL_COST_RATE}"
+        ),
     )
     parser.add_argument(
         "--buy-start-time",
@@ -405,6 +444,9 @@ def _build_cycle_payload(cycle_no: int, result) -> dict[str, Any]:
         "intraday_bar_refresh": _serialize_cycle_step(result.intraday_bar_refresh),
         "sell_exit_scan": _serialize_cycle_step(result.sell_exit_scan),
         "sell_macd_scan": _serialize_cycle_step(result.sell_macd_scan),
+        "timing2_lot_exit_scan": _serialize_cycle_step(
+            result.timing2_lot_exit_scan
+        ),
         "sell_execution": _serialize_cycle_step(result.sell_execution),
         "buy_trigger_scan": _serialize_cycle_step(result.buy_trigger_scan),
         "buy_execution": _serialize_cycle_step(result.buy_execution),
@@ -418,6 +460,7 @@ def _print_cycle_summary(cycle_payload: dict[str, Any]) -> None:
         "intraday_bar_refresh",
         "sell_exit_scan",
         "sell_macd_scan",
+        "timing2_lot_exit_scan",
         "sell_execution",
         "buy_trigger_scan",
         "buy_execution",
@@ -438,6 +481,7 @@ def _cycle_failed(cycle_payload: dict[str, Any]) -> bool:
             "intraday_bar_refresh",
             "sell_exit_scan",
             "sell_macd_scan",
+            "timing2_lot_exit_scan",
             "sell_execution",
             "buy_trigger_scan",
             "buy_execution",
@@ -477,6 +521,7 @@ def main() -> int:
             per_order_budget=args.per_order_budget,
             max_holdings=args.max_holdings,
             max_daily_order_count=args.max_daily_order_count,
+            max_daily_loss=args.max_daily_loss,
             start_time=args.buy_start_time,
             cutoff_time=args.buy_cutoff_time,
         ).validated()
@@ -495,6 +540,14 @@ def main() -> int:
             consecutive_decline_bars=args.sell_macd_consecutive_decrease_bars
             if hasattr(args, "sell_macd_consecutive_decrease_bars")
             else args.sell_macd_consecutive_decline_bars,
+        ).validated()
+        timing2_lot_exit_settings = Timing2LotExitSettings(
+            stop_loss_ratio=args.timing2_lot_stop_loss_percent / 100.0,
+            take_profit_ratio=args.timing2_lot_take_profit_percent / 100.0,
+            partial_take_profit_ratio=(
+                args.timing2_lot_partial_take_profit_percent / 100.0
+            ),
+            sell_cost_rate=args.timing2_lot_sell_cost_rate,
         ).validated()
         timing1_settings = Timing1IntradayTriggerSettings(
             start_time=args.timing1_start_time,
@@ -536,6 +589,10 @@ def main() -> int:
     _ok(
         "max_daily_order_count",
         "-" if buy_execution_settings.max_daily_order_count is None else str(buy_execution_settings.max_daily_order_count),
+    )
+    _ok(
+        "max_daily_loss",
+        "-" if buy_execution_settings.max_daily_loss is None else str(buy_execution_settings.max_daily_loss),
     )
     _ok("earliest_start", earliest_start.strftime("%H:%M:%S"))
     _ok("latest_cutoff", latest_cutoff.strftime("%H:%M:%S"))
@@ -605,10 +662,14 @@ def main() -> int:
             position_repo = PositionRepository(conn)
             execution_repo = ExecutionRepository(conn)
             intraday_bar_repo = IntradayBar15mRepository(conn)
+            intraday_bar_30s_repo = IntradayBar30sRepository(conn)
+            entry_lot_repo = EntryLotRepository(conn)
+            daily_stats_repo = DailyStatsRepository(conn)
             trading_control_repo = TradingControlRepository(conn)
             risk_guard_service = TradingRiskGuardService(
                 order_repo=order_repo,
                 trading_control_repo=trading_control_repo,
+                daily_stats_repo=daily_stats_repo,
             )
             order_service = OrderService(
                 broker=broker,
@@ -658,6 +719,13 @@ def main() -> int:
                     intraday_bar_repo=intraday_bar_repo,
                     signal_repo=signal_repo,
                 ),
+                timing2_lot_exit_scan_service=Timing2LotExitScanService(
+                    broker=broker,
+                    conn=conn,
+                    entry_lot_repo=entry_lot_repo,
+                    signal_repo=signal_repo,
+                    intraday_bar_repo=intraday_bar_30s_repo,
+                ),
                 sell_signal_execution_service=SellSignalExecutionService(
                     broker=broker,
                     conn=conn,
@@ -666,6 +734,7 @@ def main() -> int:
                     position_repo=position_repo,
                     order_service=order_service,
                     risk_guard_service=risk_guard_service,
+                    entry_lot_repo=entry_lot_repo,
                 ),
                 buy_trigger_scan_service=IntradayTriggerCombinedScanService(
                     broker=broker,
@@ -711,6 +780,7 @@ def main() -> int:
                     sell_exit_settings=sell_exit_settings,
                     sell_macd_settings=sell_macd_settings,
                     sell_macd_history_limit=args.sell_macd_history_limit,
+                    timing2_lot_exit_settings=timing2_lot_exit_settings,
                     sell_execution_settings=sell_execution_settings,
                     sell_signal_limit=args.sell_signal_limit,
                     run_timing1=run_timing1,

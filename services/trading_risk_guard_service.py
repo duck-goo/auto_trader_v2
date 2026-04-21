@@ -8,7 +8,11 @@ from typing import Callable
 
 import pytz
 
-from storage.repositories import OrderRepository, TradingControlRepository
+from storage.repositories import (
+    DailyStatsRepository,
+    OrderRepository,
+    TradingControlRepository,
+)
 
 _KST = pytz.timezone("Asia/Seoul")
 
@@ -32,7 +36,9 @@ class TradingRiskGuardResult:
     kill_switch_enabled: bool
     kill_switch_note: str | None
     today_order_count: int
+    today_realized_pnl: int | None
     max_daily_order_count: int | None
+    max_daily_loss: int | None
     buy_allowed: bool
     buy_block_reason_code: str | None
     buy_block_reason_message: str | None
@@ -49,10 +55,12 @@ class TradingRiskGuardService:
         *,
         order_repo: OrderRepository,
         trading_control_repo: TradingControlRepository,
+        daily_stats_repo: DailyStatsRepository,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._order_repo = order_repo
         self._trading_control_repo = trading_control_repo
+        self._daily_stats_repo = daily_stats_repo
         self._now_fn = now_fn or _default_now
 
     def evaluate(
@@ -60,10 +68,15 @@ class TradingRiskGuardService:
         *,
         trade_date: str,
         max_daily_order_count: int | None = None,
+        max_daily_loss: int | None = None,
     ) -> TradingRiskGuardResult:
         normalized_max_daily_order_count = _validate_optional_positive_int(
             "max_daily_order_count",
             max_daily_order_count,
+        )
+        normalized_max_daily_loss = _validate_optional_positive_int(
+            "max_daily_loss",
+            max_daily_loss,
         )
         evaluated_at = self._now_fn().astimezone(_KST).isoformat()
         kill_switch_row = self._trading_control_repo.get_kill_switch()
@@ -74,6 +87,11 @@ class TradingRiskGuardService:
         today_order_count = self._order_repo.count_requested_for_trade_date(
             trade_date=trade_date
         )
+        today_realized_pnl: int | None = None
+        if normalized_max_daily_loss is not None:
+            today_realized_pnl = self._daily_stats_repo.calculate_day(
+                trade_date
+            ).realized_pnl
 
         if kill_switch_enabled:
             reason_code = "KILL_SWITCH_ENABLED"
@@ -86,13 +104,41 @@ class TradingRiskGuardService:
                 kill_switch_enabled=True,
                 kill_switch_note=kill_switch_note,
                 today_order_count=today_order_count,
+                today_realized_pnl=today_realized_pnl,
                 max_daily_order_count=normalized_max_daily_order_count,
+                max_daily_loss=normalized_max_daily_loss,
                 buy_allowed=False,
                 buy_block_reason_code=reason_code,
                 buy_block_reason_message=reason_message,
                 sell_allowed=False,
                 sell_block_reason_code=reason_code,
                 sell_block_reason_message=reason_message,
+            )
+
+        if (
+            normalized_max_daily_loss is not None
+            and today_realized_pnl is not None
+            and today_realized_pnl <= -normalized_max_daily_loss
+        ):
+            return TradingRiskGuardResult(
+                trade_date=trade_date,
+                evaluated_at=evaluated_at,
+                kill_switch_enabled=False,
+                kill_switch_note=kill_switch_note,
+                today_order_count=today_order_count,
+                today_realized_pnl=today_realized_pnl,
+                max_daily_order_count=normalized_max_daily_order_count,
+                max_daily_loss=normalized_max_daily_loss,
+                buy_allowed=False,
+                buy_block_reason_code="MAX_DAILY_LOSS_REACHED",
+                buy_block_reason_message=(
+                    "Daily realized loss limit reached for new buy orders: "
+                    f"realized_pnl={today_realized_pnl}, "
+                    f"max_daily_loss={normalized_max_daily_loss}"
+                ),
+                sell_allowed=True,
+                sell_block_reason_code=None,
+                sell_block_reason_message=None,
             )
 
         if (
@@ -105,7 +151,9 @@ class TradingRiskGuardService:
                 kill_switch_enabled=False,
                 kill_switch_note=kill_switch_note,
                 today_order_count=today_order_count,
+                today_realized_pnl=today_realized_pnl,
                 max_daily_order_count=normalized_max_daily_order_count,
+                max_daily_loss=normalized_max_daily_loss,
                 buy_allowed=False,
                 buy_block_reason_code="MAX_DAILY_ORDER_COUNT_REACHED",
                 buy_block_reason_message=(
@@ -124,7 +172,9 @@ class TradingRiskGuardService:
             kill_switch_enabled=False,
             kill_switch_note=kill_switch_note,
             today_order_count=today_order_count,
+            today_realized_pnl=today_realized_pnl,
             max_daily_order_count=normalized_max_daily_order_count,
+            max_daily_loss=normalized_max_daily_loss,
             buy_allowed=True,
             buy_block_reason_code=None,
             buy_block_reason_message=None,

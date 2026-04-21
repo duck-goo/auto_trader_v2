@@ -9,7 +9,12 @@ import pytz
 from services import TradingRiskGuardService
 from storage.db import get_connection, transaction
 from storage.migrations.runner import run_migrations
-from storage.repositories import OrderRepository, TradingControlRepository
+from storage.repositories import (
+    DailyStatsRepository,
+    ExecutionRepository,
+    OrderRepository,
+    TradingControlRepository,
+)
 
 
 KST = pytz.timezone("Asia/Seoul")
@@ -51,6 +56,7 @@ def test_evaluate_blocks_buy_when_max_daily_order_count_reached(test_db_path):
         service = TradingRiskGuardService(
             order_repo=order_repo,
             trading_control_repo=control_repo,
+            daily_stats_repo=DailyStatsRepository(conn),
             now_fn=_fixed_now,
         )
         result = service.evaluate(
@@ -82,6 +88,7 @@ def test_evaluate_blocks_buy_and_sell_when_kill_switch_enabled(test_db_path):
         service = TradingRiskGuardService(
             order_repo=order_repo,
             trading_control_repo=control_repo,
+            daily_stats_repo=DailyStatsRepository(conn),
             now_fn=_fixed_now,
         )
         result = service.evaluate(trade_date=TRADE_DATE)
@@ -91,5 +98,92 @@ def test_evaluate_blocks_buy_and_sell_when_kill_switch_enabled(test_db_path):
         assert result.sell_allowed is False
         assert result.buy_block_reason_code == "KILL_SWITCH_ENABLED"
         assert result.sell_block_reason_code == "KILL_SWITCH_ENABLED"
+    finally:
+        conn.close()
+
+
+def test_evaluate_blocks_buy_when_max_daily_loss_reached(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        order_repo = OrderRepository(conn)
+        execution_repo = ExecutionRepository(conn)
+        control_repo = TradingControlRepository(conn)
+        daily_stats_repo = DailyStatsRepository(conn)
+
+        with transaction(conn):
+            buy_order = order_repo.create(
+                client_order_id="BUY-PREV-001",
+                symbol="005930",
+                side="buy",
+                qty=4,
+                price=100_000,
+                order_type="LIMIT",
+                strategy_name="seed",
+                requested_at="2026-04-16T15:00:00+09:00",
+            )
+            order_repo.mark_submitted(
+                client_order_id=buy_order.client_order_id,
+                kis_order_no="KIS-BUY-PREV-001",
+                submitted_at="2026-04-16T15:00:01+09:00",
+            )
+            execution_repo.insert_if_new(
+                order_id=buy_order.id,
+                kis_exec_no="EXEC-BUY-PREV-001",
+                symbol="005930",
+                side="buy",
+                qty=4,
+                price=100_000,
+                executed_at="2026-04-16T15:01:00+09:00",
+            )
+            order_repo.mark_filled(
+                client_order_id=buy_order.client_order_id,
+                closed_at="2026-04-16T15:01:00+09:00",
+            )
+
+            sell_order = order_repo.create(
+                client_order_id="SELL-001",
+                symbol="005930",
+                side="sell",
+                qty=4,
+                price=95_000,
+                order_type="LIMIT",
+                strategy_name="stop",
+                requested_at="2026-04-17T09:20:00+09:00",
+            )
+            order_repo.mark_submitted(
+                client_order_id=sell_order.client_order_id,
+                kis_order_no="KIS-SELL-001",
+                submitted_at="2026-04-17T09:20:01+09:00",
+            )
+            execution_repo.insert_if_new(
+                order_id=sell_order.id,
+                kis_exec_no="EXEC-SELL-001",
+                symbol="005930",
+                side="sell",
+                qty=4,
+                price=95_000,
+                executed_at="2026-04-17T09:21:00+09:00",
+            )
+            order_repo.mark_filled(
+                client_order_id=sell_order.client_order_id,
+                closed_at="2026-04-17T09:21:00+09:00",
+            )
+
+        service = TradingRiskGuardService(
+            order_repo=order_repo,
+            trading_control_repo=control_repo,
+            daily_stats_repo=daily_stats_repo,
+            now_fn=_fixed_now,
+        )
+        result = service.evaluate(
+            trade_date=TRADE_DATE,
+            max_daily_loss=10_000,
+        )
+
+        assert result.today_realized_pnl == -20_000
+        assert result.buy_allowed is False
+        assert result.buy_block_reason_code == "MAX_DAILY_LOSS_REACHED"
+        assert result.sell_allowed is True
     finally:
         conn.close()
