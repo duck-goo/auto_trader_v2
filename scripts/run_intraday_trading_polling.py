@@ -44,13 +44,19 @@ from services import (
     StaleBuyOrderCancelService,
     StaleBuyOrderCancelSettings,
     StaleSellOrderCancelService,
+    Timing2PriceSampleCaptureService,
+    Timing2SetupSignalReadiness,
+    Timing2ThirtySecondBarBuildService,
+    Timing2ThirtySecondTriggerService,
     Timing2LotExitScanService,
     TradingRiskGuardService,
     UnresolvedOrderSyncService,
+    inspect_timing2_setup_signal_readiness,
 )
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    CurrentPriceSampleRepository,
     DailyStatsRepository,
     EntryLotRepository,
     ExecutionRepository,
@@ -63,12 +69,16 @@ from storage.repositories import (
     TradingControlRepository,
 )
 from strategy import (
+    BUY_STRATEGY_CHOICES,
     DEFAULT_TIMING2_SELL_COST_RATE,
     SellExitSettings,
     SellMacdExitSettings,
     Timing1IntradayTriggerSettings,
     Timing2LotExitSettings,
+    Timing2ThirtySecondTriggerSettings,
     Timing2IntradayTriggerSettings,
+    resolve_buy_strategy_selection,
+    selection_to_buy_strategy,
 )
 
 KST = pytz.timezone("Asia/Seoul")
@@ -224,6 +234,33 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--timing2-30s-min-samples-per-bar",
+        type=int,
+        default=2,
+        help="Minimum samples required to build one Timing2 30s bar. Default: 2",
+    )
+    parser.add_argument(
+        "--timing2-max-sample-symbols-per-cycle",
+        type=int,
+        default=30,
+        help="Max Timing2 symbols to sample per cycle. Default: 30",
+    )
+    parser.add_argument(
+        "--timing2-30s-morning-start-time",
+        default="09:00:00",
+        help="Timing2 30s morning pattern start time HH:MM:SS. Default: 09:00:00",
+    )
+    parser.add_argument(
+        "--timing2-30s-morning-end-time",
+        default="10:00:00",
+        help="Timing2 30s morning pattern end time HH:MM:SS. Default: 10:00:00",
+    )
+    parser.add_argument(
+        "--timing2-30s-range-breakout-start-time",
+        default="10:00:00",
+        help="Timing2 30s range breakout start time HH:MM:SS. Default: 10:00:00",
+    )
+    parser.add_argument(
         "--buy-start-time",
         default="09:00:00",
         help="Buy execution start time HH:MM:SS. Default: 09:00:00",
@@ -274,6 +311,15 @@ def _parse_args() -> argparse.Namespace:
         "--timing2-cutoff-time",
         default="12:00:00",
         help="Timing2 monitoring cutoff time HH:MM:SS. Default: 12:00:00",
+    )
+    parser.add_argument(
+        "--buy-strategy",
+        choices=BUY_STRATEGY_CHOICES,
+        default=None,
+        help=(
+            "Buy strategy selection for future UI controls. "
+            "Choices: timing1, timing2, both. Default: legacy scan flags, or both."
+        ),
     )
     parser.add_argument(
         "--interval-seconds",
@@ -347,9 +393,11 @@ def _validate_positive_int(name: str, value: int, *, allow_zero: bool = False) -
 
 
 def _resolve_scan_selection(args: argparse.Namespace) -> tuple[bool, bool]:
-    if not args.scan_timing1 and not args.scan_timing2:
-        return True, True
-    return args.scan_timing1, args.scan_timing2
+    return resolve_buy_strategy_selection(
+        buy_strategy=args.buy_strategy,
+        scan_timing1=args.scan_timing1,
+        scan_timing2=args.scan_timing2,
+    )
 
 
 def _resolve_lock_name(args: argparse.Namespace) -> str:
@@ -442,15 +490,43 @@ def _build_cycle_payload(cycle_no: int, result) -> dict[str, Any]:
         "record_scan_signals": result.record_scan_signals,
         "maintenance": _serialize_cycle_step(result.maintenance),
         "intraday_bar_refresh": _serialize_cycle_step(result.intraday_bar_refresh),
+        "timing2_price_sample_capture": _serialize_cycle_step(
+            result.timing2_price_sample_capture
+        ),
+        "timing2_30s_bar_build": _serialize_cycle_step(
+            result.timing2_30s_bar_build
+        ),
         "sell_exit_scan": _serialize_cycle_step(result.sell_exit_scan),
         "sell_macd_scan": _serialize_cycle_step(result.sell_macd_scan),
         "timing2_lot_exit_scan": _serialize_cycle_step(
             result.timing2_lot_exit_scan
         ),
         "sell_execution": _serialize_cycle_step(result.sell_execution),
+        "timing2_30s_trigger_scan": _serialize_cycle_step(
+            result.timing2_30s_trigger_scan
+        ),
         "buy_trigger_scan": _serialize_cycle_step(result.buy_trigger_scan),
         "buy_execution": _serialize_cycle_step(result.buy_execution),
     }
+
+
+def _readiness_payload(
+    readiness: Timing2SetupSignalReadiness | None,
+) -> dict[str, Any] | None:
+    if readiness is None:
+        return None
+    return readiness.to_payload()
+
+
+def _print_timing2_setup_readiness(
+    readiness: Timing2SetupSignalReadiness,
+) -> None:
+    if not readiness.required:
+        return
+    _ok("timing2_setup_signal_count", str(readiness.setup_signal_count))
+    _ok("timing2_setup_ready", str(readiness.ready))
+    if readiness.reason:
+        _warn("timing2_setup_readiness", readiness.reason)
 
 
 def _print_cycle_summary(cycle_payload: dict[str, Any]) -> None:
@@ -458,10 +534,13 @@ def _print_cycle_summary(cycle_payload: dict[str, Any]) -> None:
     for step_name in (
         "maintenance",
         "intraday_bar_refresh",
+        "timing2_price_sample_capture",
+        "timing2_30s_bar_build",
         "sell_exit_scan",
         "sell_macd_scan",
         "timing2_lot_exit_scan",
         "sell_execution",
+        "timing2_30s_trigger_scan",
         "buy_trigger_scan",
         "buy_execution",
     ):
@@ -479,10 +558,13 @@ def _cycle_failed(cycle_payload: dict[str, Any]) -> bool:
         for step_name in (
             "maintenance",
             "intraday_bar_refresh",
+            "timing2_price_sample_capture",
+            "timing2_30s_bar_build",
             "sell_exit_scan",
             "sell_macd_scan",
             "timing2_lot_exit_scan",
             "sell_execution",
+            "timing2_30s_trigger_scan",
             "buy_trigger_scan",
             "buy_execution",
         )
@@ -491,9 +573,9 @@ def _cycle_failed(cycle_payload: dict[str, Any]) -> bool:
 
 def main() -> int:
     args = _parse_args()
-    run_timing1, run_timing2 = _resolve_scan_selection(args)
 
     try:
+        run_timing1, run_timing2 = _resolve_scan_selection(args)
         _validate_positive_int("interval_seconds", args.interval_seconds)
         _validate_positive_int("max_cycles", args.max_cycles, allow_zero=True)
         _validate_positive_int(
@@ -508,6 +590,14 @@ def main() -> int:
         _validate_positive_int(
             "sell_macd_history_limit",
             args.sell_macd_history_limit,
+        )
+        _validate_positive_int(
+            "timing2_30s_min_samples_per_bar",
+            args.timing2_30s_min_samples_per_bar,
+        )
+        _validate_positive_int(
+            "timing2_max_sample_symbols_per_cycle",
+            args.timing2_max_sample_symbols_per_cycle,
         )
         if args.lock_lease_seconds != 0:
             _validate_positive_int("lock_lease_seconds", args.lock_lease_seconds)
@@ -558,6 +648,11 @@ def main() -> int:
             start_time=args.timing2_start_time,
             cutoff_time=args.timing2_cutoff_time,
         ).validated()
+        timing2_30s_trigger_settings = Timing2ThirtySecondTriggerSettings(
+            morning_start_time=args.timing2_30s_morning_start_time,
+            morning_end_time=args.timing2_30s_morning_end_time,
+            range_breakout_start_time=args.timing2_30s_range_breakout_start_time,
+        ).validated()
         lock_name = _resolve_lock_name(args)
         lock_lease_seconds = _resolve_lock_lease_seconds(args)
     except Exception as exc:
@@ -579,8 +674,23 @@ def main() -> int:
     _ok("mode", settings.mode)
     _ok("trade_date", args.trade_date)
     _ok("execute", str(args.execute))
+    _ok(
+        "buy_strategy",
+        selection_to_buy_strategy(
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
+        ),
+    )
     _ok("run_timing1", str(run_timing1))
     _ok("run_timing2", str(run_timing2))
+    _ok(
+        "timing2_30s_min_samples_per_bar",
+        str(args.timing2_30s_min_samples_per_bar),
+    )
+    _ok(
+        "timing2_max_sample_symbols_per_cycle",
+        str(args.timing2_max_sample_symbols_per_cycle),
+    )
     _ok("interval_seconds", str(args.interval_seconds))
     _ok("max_cycles", str(args.max_cycles))
     _ok("max_consecutive_failures", str(args.max_consecutive_failures))
@@ -618,8 +728,16 @@ def main() -> int:
     lock_owner_id: str | None = None
     lock_service: RuntimeLockService | None = None
     released_lock = False
+    timing2_setup_readiness: Timing2SetupSignalReadiness | None = None
 
     try:
+        timing2_setup_readiness = inspect_timing2_setup_signal_readiness(
+            signal_repo=SignalRepository(conn),
+            trade_date=args.trade_date,
+            run_timing2=run_timing2,
+        )
+        _print_timing2_setup_readiness(timing2_setup_readiness)
+
         lock_service = RuntimeLockService(
             conn=conn,
             lock_repo=RuntimeLockRepository(conn),
@@ -651,6 +769,9 @@ def main() -> int:
                         "lock_owner_id": lock_owner_id,
                         "lock_lease_seconds": lock_lease_seconds,
                         "lock_acquired": False,
+                        "timing2_setup_readiness": _readiness_payload(
+                            timing2_setup_readiness
+                        ),
                         "cycles": [],
                     },
                 )
@@ -661,6 +782,7 @@ def main() -> int:
             order_repo = OrderRepository(conn)
             position_repo = PositionRepository(conn)
             execution_repo = ExecutionRepository(conn)
+            current_price_sample_repo = CurrentPriceSampleRepository(conn)
             intraday_bar_repo = IntradayBar15mRepository(conn)
             intraday_bar_30s_repo = IntradayBar30sRepository(conn)
             entry_lot_repo = EntryLotRepository(conn)
@@ -707,6 +829,22 @@ def main() -> int:
                     position_repo=position_repo,
                     intraday_bar_repo=intraday_bar_repo,
                 ),
+                timing2_price_sample_capture_service=(
+                    Timing2PriceSampleCaptureService(
+                        broker=broker,
+                        conn=conn,
+                        signal_repo=signal_repo,
+                        sample_repo=current_price_sample_repo,
+                    )
+                ),
+                timing2_30s_bar_build_service=(
+                    Timing2ThirtySecondBarBuildService(
+                        conn=conn,
+                        signal_repo=signal_repo,
+                        sample_repo=current_price_sample_repo,
+                        intraday_bar_repo=intraday_bar_30s_repo,
+                    )
+                ),
                 sell_exit_scan_service=SellExitScanService(
                     broker=broker,
                     conn=conn,
@@ -735,6 +873,11 @@ def main() -> int:
                     order_service=order_service,
                     risk_guard_service=risk_guard_service,
                     entry_lot_repo=entry_lot_repo,
+                ),
+                timing2_30s_trigger_service=Timing2ThirtySecondTriggerService(
+                    conn=conn,
+                    signal_repo=signal_repo,
+                    intraday_bar_repo=intraday_bar_30s_repo,
                 ),
                 buy_trigger_scan_service=IntradayTriggerCombinedScanService(
                     broker=broker,
@@ -788,6 +931,13 @@ def main() -> int:
                     timing1_settings=timing1_settings,
                     timing1_daily_count=args.timing1_daily_count,
                     timing2_settings=timing2_settings,
+                    timing2_30s_trigger_settings=timing2_30s_trigger_settings,
+                    timing2_30s_min_samples_per_bar=(
+                        args.timing2_30s_min_samples_per_bar
+                    ),
+                    timing2_max_sample_symbols_per_cycle=(
+                        args.timing2_max_sample_symbols_per_cycle
+                    ),
                     buy_execution_settings=buy_execution_settings,
                     buy_signal_limit=args.buy_signal_limit,
                     record_scan_signals=args.execute,
@@ -837,6 +987,9 @@ def main() -> int:
                     "lock_owner_id": lock_owner_id,
                     "lock_lease_seconds": lock_lease_seconds,
                     "lock_acquired": lock_acquired,
+                    "timing2_setup_readiness": _readiness_payload(
+                        timing2_setup_readiness
+                    ),
                     "cycles": cycles,
                 },
             )
@@ -855,6 +1008,12 @@ def main() -> int:
         "finished_at": datetime.now(KST).isoformat(),
         "stop_reason": stop_reason,
         "execute_mode": args.execute,
+        "buy_strategy": selection_to_buy_strategy(
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
+        ),
+        "run_timing1": run_timing1,
+        "run_timing2": run_timing2,
         "interval_seconds": args.interval_seconds,
         "max_cycles": args.max_cycles,
         "max_consecutive_failures": args.max_consecutive_failures,
@@ -863,6 +1022,7 @@ def main() -> int:
         "lock_lease_seconds": lock_lease_seconds,
         "lock_acquired": lock_acquired,
         "lock_released": released_lock,
+        "timing2_setup_readiness": _readiness_payload(timing2_setup_readiness),
         "cycle_count": len(cycles),
         "cycles": cycles,
     }

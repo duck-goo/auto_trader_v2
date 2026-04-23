@@ -18,7 +18,11 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _set_cli_args(monkeypatch, args: list[str]) -> None:
-    monkeypatch.setattr(sys, "argv", ["show_daily_ops_report.py", *args])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["show_daily_ops_report.py", "--trade-date", "2026-04-20", *args],
+    )
 
 
 def test_main_builds_ready_report_with_known_artifacts(
@@ -92,6 +96,35 @@ def test_main_builds_ready_report_with_known_artifacts(
             "overall_outcome": "COMPLETED",
             "overall_reason": None,
             "include_after_close": False,
+            "scan_settings": {
+                "scan_timing1": False,
+                "scan_timing2": True,
+                "timing2_30s_min_samples_per_bar": 2,
+                "timing2_max_sample_symbols_per_cycle": 30,
+            },
+            "steps": [
+                {
+                    "name": "Trading Session Preview",
+                    "outcome": "COMPLETED",
+                    "result": {
+                        "polling_result": {
+                            "cycles": [
+                                {
+                                    "timing2_price_sample_capture": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                    "timing2_30s_bar_build": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                    "timing2_30s_trigger_scan": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+            ],
         },
     )
 
@@ -127,6 +160,8 @@ def test_main_builds_ready_report_with_known_artifacts(
     assert payload["artifacts"]["trading_session_preview"]["polling_stop_reason"] == "MAX_CYCLES_REACHED"
     assert payload["latest_kill_switch"]["enabled"] is False
     assert payload["rehearsals"][0]["overall_outcome"] == "COMPLETED"
+    assert payload["rehearsals"][0]["scan_settings"]["scan_timing2"] is True
+    assert payload["rehearsals"][0]["timing2_30s_verified"] is True
 
 
 def test_main_marks_attention_when_blocked_or_manual_actions_exist(
@@ -308,6 +343,135 @@ def test_main_strict_returns_4_for_warning_only(
     assert payload["highest_severity"] == "WARNING"
     assert "MANUAL_RECOVERY_REQUIRED" in payload["attention_flags"]
     assert payload["action_items"][0]["action_code"] == "REVIEW_EXECUTION_RECOVERY"
+
+
+def test_main_warns_when_timing2_rehearsal_did_not_verify_30s_pipeline(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_daily_ops_timing2_gap")
+    output_path = ops_dir / "daily_ops_report.json"
+
+    _write_json(
+        ops_dir / "rehearsal_timing2" / "rehearsal_summary.json",
+        {
+            "trade_date": "2026-04-20",
+            "overall_outcome": "COMPLETED",
+            "overall_reason": None,
+            "include_after_close": False,
+            "scan_settings": {
+                "scan_timing1": False,
+                "scan_timing2": True,
+                "timing2_30s_min_samples_per_bar": 2,
+                "timing2_max_sample_symbols_per_cycle": 30,
+            },
+            "steps": [
+                {
+                    "name": "Trading Session Preview",
+                    "outcome": "COMPLETED",
+                    "result": {
+                        "polling_result": {
+                            "cycles": [
+                                {
+                                    "timing2_price_sample_capture": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["health_outcome"] == "WARNING"
+    assert "REHEARSAL_TIMING2_30S_NOT_VERIFIED" in payload["attention_flags"]
+    action_items = {row["flag"]: row for row in payload["action_items"]}
+    assert (
+        action_items["REHEARSAL_TIMING2_30S_NOT_VERIFIED"]["action_code"]
+        == "RERUN_TIMING2_REHEARSAL"
+    )
+    assert payload["rehearsals"][0]["timing2_30s_verified"] is False
+
+
+def test_main_warns_when_trading_session_timing2_setup_is_not_ready(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_daily_ops_timing2_setup")
+    output_path = ops_dir / "daily_ops_report.json"
+
+    _write_json(
+        ops_dir / "run_trading_session.preview.json",
+        {
+            "trade_date": "2026-04-20",
+            "execute_mode": False,
+            "session_outcome": "COMPLETED",
+            "session_reason": None,
+            "preopen_exit_code": 0,
+            "preopen_result": {
+                "readiness_outcome": "READY",
+                "readiness_reason": None,
+            },
+            "polling_started": True,
+            "polling_exit_code": 0,
+            "polling_result": {
+                "stop_reason": "MAX_CYCLES_REACHED",
+                "timing2_setup_readiness": {
+                    "trade_date": "2026-04-20",
+                    "required": True,
+                    "setup_signal_count": 0,
+                    "ready": False,
+                    "reason": "Timing2 setup signals are missing for this trade date.",
+                },
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    flag = "TRADING_SESSION_PREVIEW_TIMING2_SETUP_NOT_READY"
+    assert payload["health_outcome"] == "WARNING"
+    assert flag in payload["attention_flags"]
+    assert payload["artifacts"]["trading_session_preview"]["timing2_setup_ready"] is False
+    assert (
+        payload["artifacts"]["trading_session_preview"]["timing2_setup_signal_count"]
+        == 0
+    )
+    action_items = {row["flag"]: row for row in payload["action_items"]}
+    assert (
+        action_items[flag]["action_code"]
+        == "RERUN_TRADING_SESSION_WITH_TIMING2_SETUP"
+    )
+    assert "--preopen-scan-timing2-setup" in action_items[flag]["suggested_command"]
+    assert "--preopen-write-timing2-signals" in action_items[flag]["suggested_command"]
 
 
 def test_main_strict_returns_5_for_critical_attention(

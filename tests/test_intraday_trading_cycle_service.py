@@ -18,6 +18,7 @@ from strategy import (
     Timing1IntradayTriggerSettings,
     Timing2IntradayTriggerSettings,
     Timing2LotExitSettings,
+    Timing2ThirtySecondTriggerSettings,
 )
 
 
@@ -78,6 +79,60 @@ class _FakeIntradayBarRefreshService:
                 "refreshed_at": "2026-04-17T09:20:00+09:00",
             },
         )()
+
+
+class _FakeTiming2PriceSampleCaptureService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def capture(self, *, trade_date: str, write_samples: bool, max_symbols: int):
+        self.calls.append(
+            {
+                "trade_date": trade_date,
+                "write_samples": write_samples,
+                "max_symbols": max_symbols,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return type(
+            "_CaptureResult",
+            (),
+            {
+                "failed_count": 0,
+                "setup_signal_count": max_symbols,
+                "candidate_count": max_symbols,
+                "skipped_by_limit_count": 0,
+                "preview_ready_count": 0,
+                "captured_count": max_symbols,
+                "captured_at": "2026-04-17T09:00:00+09:00",
+            },
+        )()
+
+
+class _FakeTiming2ThirtySecondBarBuildService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def build(
+        self,
+        *,
+        trade_date: str,
+        min_samples_per_bar: int,
+        write_bars: bool,
+    ):
+        self.calls.append(
+            {
+                "trade_date": trade_date,
+                "min_samples_per_bar": min_samples_per_bar,
+                "write_bars": write_bars,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return type("_BarBuildResult", (), {"failed_count": 0})()
 
 
 class _FakeSellScanService:
@@ -144,6 +199,24 @@ class _FakeBuyTriggerScanService:
         )
 
 
+class _FakeTiming2ThirtySecondTriggerService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def scan(self, *, trade_date: str, settings, write_signals: bool):
+        self.calls.append(
+            {
+                "trade_date": trade_date,
+                "settings": settings,
+                "write_signals": write_signals,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return _FakeResult("timing2_30s_trigger_scan")
+
+
 class _FakeBuyExecutionService:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -170,20 +243,26 @@ class _FakeBuyExecutionService:
 def test_run_cycle_skips_order_execution_when_maintenance_fails():
     maintenance_service = _FakeMaintenanceService(error=RuntimeError("maintenance down"))
     refresh_service = _FakeIntradayBarRefreshService()
+    price_sample_capture_service = _FakeTiming2PriceSampleCaptureService()
+    bar_build_service = _FakeTiming2ThirtySecondBarBuildService()
     sell_exit_scan_service = _FakeSellScanService("sell_exit_scan")
     sell_macd_scan_service = _FakeSellScanService("sell_macd_scan")
     timing2_lot_exit_scan_service = _FakeSellScanService("timing2_lot_exit_scan")
     sell_execution_service = _FakeSellExecutionService()
+    timing2_30s_trigger_service = _FakeTiming2ThirtySecondTriggerService()
     buy_trigger_scan_service = _FakeBuyTriggerScanService()
     buy_execution_service = _FakeBuyExecutionService()
 
     service = IntradayTradingCycleService(
         order_maintenance_service=maintenance_service,
         intraday_bar_refresh_service=refresh_service,
+        timing2_price_sample_capture_service=price_sample_capture_service,
+        timing2_30s_bar_build_service=bar_build_service,
         sell_exit_scan_service=sell_exit_scan_service,
         sell_macd_scan_service=sell_macd_scan_service,
         timing2_lot_exit_scan_service=timing2_lot_exit_scan_service,
         sell_signal_execution_service=sell_execution_service,
+        timing2_30s_trigger_service=timing2_30s_trigger_service,
         buy_trigger_scan_service=buy_trigger_scan_service,
         buy_signal_execution_service=buy_execution_service,
     )
@@ -206,6 +285,9 @@ def test_run_cycle_skips_order_execution_when_maintenance_fails():
         timing1_settings=Timing1IntradayTriggerSettings(),
         timing1_daily_count=5,
         timing2_settings=Timing2IntradayTriggerSettings(),
+        timing2_30s_trigger_settings=Timing2ThirtySecondTriggerSettings(),
+        timing2_30s_min_samples_per_bar=2,
+        timing2_max_sample_symbols_per_cycle=30,
         buy_execution_settings=BuySignalExecutionSettings(
             per_order_budget=1_000_000,
             max_holdings=3,
@@ -216,11 +298,16 @@ def test_run_cycle_skips_order_execution_when_maintenance_fails():
     assert result.maintenance.outcome == "FAILED"
     assert result.intraday_bar_refresh.outcome == "COMPLETED"
     assert refresh_service.calls[0]["write"] is True
+    assert price_sample_capture_service.calls[0]["write_samples"] is True
+    assert price_sample_capture_service.calls[0]["max_symbols"] == 30
+    assert bar_build_service.calls[0]["write_bars"] is True
     assert sell_exit_scan_service.calls[0]["write_signals"] is False
     assert sell_macd_scan_service.calls[0]["write_signals"] is False
     assert timing2_lot_exit_scan_service.calls[0]["write_signals"] is False
+    assert timing2_30s_trigger_service.calls[0]["write_signals"] is False
     assert buy_trigger_scan_service.calls[0]["write_timing1_signals"] is False
     assert buy_trigger_scan_service.calls[0]["write_timing2_signals"] is False
+    assert buy_trigger_scan_service.calls[0]["run_timing2"] is False
     assert result.sell_execution.outcome == "SKIPPED"
     assert result.buy_execution.outcome == "SKIPPED"
     assert sell_execution_service.calls == []
@@ -230,6 +317,8 @@ def test_run_cycle_skips_order_execution_when_maintenance_fails():
 def test_run_cycle_allows_sell_execution_when_macd_scan_fails():
     maintenance_service = _FakeMaintenanceService()
     refresh_service = _FakeIntradayBarRefreshService()
+    price_sample_capture_service = _FakeTiming2PriceSampleCaptureService()
+    bar_build_service = _FakeTiming2ThirtySecondBarBuildService()
     sell_exit_scan_service = _FakeSellScanService("sell_exit_scan")
     sell_macd_scan_service = _FakeSellScanService(
         "sell_macd_scan",
@@ -237,16 +326,20 @@ def test_run_cycle_allows_sell_execution_when_macd_scan_fails():
     )
     timing2_lot_exit_scan_service = _FakeSellScanService("timing2_lot_exit_scan")
     sell_execution_service = _FakeSellExecutionService()
+    timing2_30s_trigger_service = _FakeTiming2ThirtySecondTriggerService()
     buy_trigger_scan_service = _FakeBuyTriggerScanService()
     buy_execution_service = _FakeBuyExecutionService()
 
     service = IntradayTradingCycleService(
         order_maintenance_service=maintenance_service,
         intraday_bar_refresh_service=refresh_service,
+        timing2_price_sample_capture_service=price_sample_capture_service,
+        timing2_30s_bar_build_service=bar_build_service,
         sell_exit_scan_service=sell_exit_scan_service,
         sell_macd_scan_service=sell_macd_scan_service,
         timing2_lot_exit_scan_service=timing2_lot_exit_scan_service,
         sell_signal_execution_service=sell_execution_service,
+        timing2_30s_trigger_service=timing2_30s_trigger_service,
         buy_trigger_scan_service=buy_trigger_scan_service,
         buy_signal_execution_service=buy_execution_service,
     )
@@ -269,6 +362,9 @@ def test_run_cycle_allows_sell_execution_when_macd_scan_fails():
         timing1_settings=Timing1IntradayTriggerSettings(),
         timing1_daily_count=5,
         timing2_settings=Timing2IntradayTriggerSettings(),
+        timing2_30s_trigger_settings=Timing2ThirtySecondTriggerSettings(),
+        timing2_30s_min_samples_per_bar=2,
+        timing2_max_sample_symbols_per_cycle=30,
         buy_execution_settings=BuySignalExecutionSettings(
             per_order_budget=1_000_000,
             max_holdings=3,
@@ -284,6 +380,8 @@ def test_run_cycle_allows_sell_execution_when_macd_scan_fails():
 def test_run_cycle_skips_order_execution_when_timing2_lot_exit_scan_fails():
     maintenance_service = _FakeMaintenanceService()
     refresh_service = _FakeIntradayBarRefreshService()
+    price_sample_capture_service = _FakeTiming2PriceSampleCaptureService()
+    bar_build_service = _FakeTiming2ThirtySecondBarBuildService()
     sell_exit_scan_service = _FakeSellScanService("sell_exit_scan")
     sell_macd_scan_service = _FakeSellScanService("sell_macd_scan")
     timing2_lot_exit_scan_service = _FakeSellScanService(
@@ -291,16 +389,20 @@ def test_run_cycle_skips_order_execution_when_timing2_lot_exit_scan_fails():
         error=RuntimeError("lot scan unavailable"),
     )
     sell_execution_service = _FakeSellExecutionService()
+    timing2_30s_trigger_service = _FakeTiming2ThirtySecondTriggerService()
     buy_trigger_scan_service = _FakeBuyTriggerScanService()
     buy_execution_service = _FakeBuyExecutionService()
 
     service = IntradayTradingCycleService(
         order_maintenance_service=maintenance_service,
         intraday_bar_refresh_service=refresh_service,
+        timing2_price_sample_capture_service=price_sample_capture_service,
+        timing2_30s_bar_build_service=bar_build_service,
         sell_exit_scan_service=sell_exit_scan_service,
         sell_macd_scan_service=sell_macd_scan_service,
         timing2_lot_exit_scan_service=timing2_lot_exit_scan_service,
         sell_signal_execution_service=sell_execution_service,
+        timing2_30s_trigger_service=timing2_30s_trigger_service,
         buy_trigger_scan_service=buy_trigger_scan_service,
         buy_signal_execution_service=buy_execution_service,
     )
@@ -323,6 +425,9 @@ def test_run_cycle_skips_order_execution_when_timing2_lot_exit_scan_fails():
         timing1_settings=Timing1IntradayTriggerSettings(),
         timing1_daily_count=5,
         timing2_settings=Timing2IntradayTriggerSettings(),
+        timing2_30s_trigger_settings=Timing2ThirtySecondTriggerSettings(),
+        timing2_30s_min_samples_per_bar=2,
+        timing2_max_sample_symbols_per_cycle=30,
         buy_execution_settings=BuySignalExecutionSettings(
             per_order_budget=1_000_000,
             max_holdings=3,

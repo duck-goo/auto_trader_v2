@@ -44,13 +44,19 @@ from services import (
     StaleBuyOrderCancelService,
     StaleBuyOrderCancelSettings,
     StaleSellOrderCancelService,
+    Timing2PriceSampleCaptureService,
+    Timing2SetupSignalReadiness,
+    Timing2ThirtySecondBarBuildService,
+    Timing2ThirtySecondTriggerService,
     Timing2LotExitScanService,
     TradingRiskGuardService,
     UnresolvedOrderSyncService,
+    inspect_timing2_setup_signal_readiness,
 )
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    CurrentPriceSampleRepository,
     DailyStatsRepository,
     EntryLotRepository,
     ExecutionRepository,
@@ -63,12 +69,16 @@ from storage.repositories import (
     TradingControlRepository,
 )
 from strategy import (
+    BUY_STRATEGY_CHOICES,
     DEFAULT_TIMING2_SELL_COST_RATE,
     SellExitSettings,
     SellMacdExitSettings,
     Timing1IntradayTriggerSettings,
     Timing2LotExitSettings,
+    Timing2ThirtySecondTriggerSettings,
     Timing2IntradayTriggerSettings,
+    resolve_buy_strategy_selection,
+    selection_to_buy_strategy,
 )
 
 KST = pytz.timezone("Asia/Seoul")
@@ -224,6 +234,33 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--timing2-30s-min-samples-per-bar",
+        type=int,
+        default=2,
+        help="Minimum samples required to build one Timing2 30s bar. Default: 2",
+    )
+    parser.add_argument(
+        "--timing2-max-sample-symbols-per-cycle",
+        type=int,
+        default=30,
+        help="Max Timing2 symbols to sample per cycle. Default: 30",
+    )
+    parser.add_argument(
+        "--timing2-30s-morning-start-time",
+        default="09:00:00",
+        help="Timing2 30s morning pattern start time HH:MM:SS. Default: 09:00:00",
+    )
+    parser.add_argument(
+        "--timing2-30s-morning-end-time",
+        default="10:00:00",
+        help="Timing2 30s morning pattern end time HH:MM:SS. Default: 10:00:00",
+    )
+    parser.add_argument(
+        "--timing2-30s-range-breakout-start-time",
+        default="10:00:00",
+        help="Timing2 30s range breakout start time HH:MM:SS. Default: 10:00:00",
+    )
+    parser.add_argument(
         "--buy-start-time",
         default="09:00:00",
         help="Buy execution start time HH:MM:SS. Default: 09:00:00",
@@ -276,6 +313,15 @@ def _parse_args() -> argparse.Namespace:
         help="Timing2 monitoring cutoff time HH:MM:SS. Default: 12:00:00",
     )
     parser.add_argument(
+        "--buy-strategy",
+        choices=BUY_STRATEGY_CHOICES,
+        default=None,
+        help=(
+            "Buy strategy selection for future UI controls. "
+            "Choices: timing1, timing2, both. Default: legacy scan flags, or both."
+        ),
+    )
+    parser.add_argument(
         "--execute",
         action="store_true",
         help="Actually record scan signals, place orders, and run maintenance changes.",
@@ -324,9 +370,11 @@ def _validate_positive_int(name: str, value: int) -> int:
 
 
 def _resolve_scan_selection(args: argparse.Namespace) -> tuple[bool, bool]:
-    if not args.scan_timing1 and not args.scan_timing2:
-        return True, True
-    return args.scan_timing1, args.scan_timing2
+    return resolve_buy_strategy_selection(
+        buy_strategy=args.buy_strategy,
+        scan_timing1=args.scan_timing1,
+        scan_timing2=args.scan_timing2,
+    )
 
 
 def _resolve_lock_name(args: argparse.Namespace) -> str:
@@ -372,6 +420,30 @@ def _serialize_intraday_bar_refresh_summary(result) -> dict[str, Any]:
     }
 
 
+def _serialize_timing2_price_sample_capture_summary(result) -> dict[str, Any]:
+    return {
+        "setup_signal_count": result.setup_signal_count,
+        "candidate_count": result.candidate_count,
+        "skipped_by_limit_count": result.skipped_by_limit_count,
+        "preview_ready_count": result.preview_ready_count,
+        "captured_count": result.captured_count,
+        "failed_count": result.failed_count,
+        "captured_at": result.captured_at,
+    }
+
+
+def _serialize_timing2_30s_bar_build_summary(result) -> dict[str, Any]:
+    return {
+        "setup_signal_count": result.setup_signal_count,
+        "candidate_count": result.candidate_count,
+        "preview_ready_count": result.preview_ready_count,
+        "built_symbol_count": result.built_symbol_count,
+        "skipped_count": result.skipped_count,
+        "failed_count": result.failed_count,
+        "built_at": result.built_at,
+    }
+
+
 def _serialize_sell_macd_scan_summary(result) -> dict[str, Any]:
     return {
         "position_count": result.position_count,
@@ -391,6 +463,20 @@ def _serialize_timing2_lot_exit_scan_summary(result) -> dict[str, Any]:
         "partial_take_profit_count": result.partial_take_profit_count,
         "recorded_count": result.recorded_count,
         "skipped_existing_count": result.skipped_existing_count,
+        "scanned_at": result.scanned_at,
+    }
+
+
+def _serialize_timing2_30s_trigger_scan_summary(result) -> dict[str, Any]:
+    return {
+        "setup_signal_count": result.setup_signal_count,
+        "candidate_count": result.candidate_count,
+        "evaluated_count": result.evaluated_count,
+        "skipped_count": result.skipped_count,
+        "failed_count": result.failed_count,
+        "transition_count": result.transition_count,
+        "buy_triggered_count": result.buy_triggered_count,
+        "recorded_count": result.recorded_count,
         "scanned_at": result.scanned_at,
     }
 
@@ -462,6 +548,25 @@ def _serialize_step(status, summary_builder) -> dict[str, Any]:
     }
 
 
+def _readiness_payload(
+    readiness: Timing2SetupSignalReadiness | None,
+) -> dict[str, Any] | None:
+    if readiness is None:
+        return None
+    return readiness.to_payload()
+
+
+def _print_timing2_setup_readiness(
+    readiness: Timing2SetupSignalReadiness,
+) -> None:
+    if not readiness.required:
+        return
+    _ok("timing2_setup_signal_count", str(readiness.setup_signal_count))
+    _ok("timing2_setup_ready", str(readiness.ready))
+    if readiness.reason:
+        _warn("timing2_setup_readiness", readiness.reason)
+
+
 def _build_payload(
     *,
     trade_date: str,
@@ -478,9 +583,13 @@ def _build_payload(
     timing1_settings: Timing1IntradayTriggerSettings,
     timing1_daily_count: int,
     timing2_settings: Timing2IntradayTriggerSettings,
+    timing2_30s_trigger_settings: Timing2ThirtySecondTriggerSettings,
+    timing2_30s_min_samples_per_bar: int,
+    timing2_max_sample_symbols_per_cycle: int,
     buy_signal_limit: int,
     sell_signal_limit: int,
     result=None,
+    timing2_setup_readiness: Timing2SetupSignalReadiness | None = None,
     lock_name: str | None = None,
     lock_owner_id: str | None = None,
     lock_acquired: bool = False,
@@ -493,6 +602,10 @@ def _build_payload(
         "execute_mode": execute_mode,
         "settings": {
             "timeout_seconds": timeout_seconds,
+            "buy_strategy": selection_to_buy_strategy(
+                run_timing1=run_timing1,
+                run_timing2=run_timing2,
+            ),
             "run_timing1": run_timing1,
             "run_timing2": run_timing2,
             "buy_signal_limit": buy_signal_limit,
@@ -540,11 +653,25 @@ def _build_payload(
                 "start_time": timing2_settings.start_time,
                 "cutoff_time": timing2_settings.cutoff_time,
             },
+            "timing2_30s": {
+                "min_samples_per_bar": timing2_30s_min_samples_per_bar,
+                "max_sample_symbols_per_cycle": (
+                    timing2_max_sample_symbols_per_cycle
+                ),
+                "morning_start_time": (
+                    timing2_30s_trigger_settings.morning_start_time
+                ),
+                "morning_end_time": timing2_30s_trigger_settings.morning_end_time,
+                "range_breakout_start_time": (
+                    timing2_30s_trigger_settings.range_breakout_start_time
+                ),
+            },
         },
         "lock_name": lock_name,
         "lock_owner_id": lock_owner_id,
         "lock_acquired": lock_acquired,
         "lock_released": lock_released,
+        "timing2_setup_readiness": _readiness_payload(timing2_setup_readiness),
         "error_type": error_type,
         "error_message": error_message,
         "result": None,
@@ -564,6 +691,14 @@ def _build_payload(
             result.intraday_bar_refresh,
             _serialize_intraday_bar_refresh_summary,
         ),
+        "timing2_price_sample_capture": _serialize_step(
+            result.timing2_price_sample_capture,
+            _serialize_timing2_price_sample_capture_summary,
+        ),
+        "timing2_30s_bar_build": _serialize_step(
+            result.timing2_30s_bar_build,
+            _serialize_timing2_30s_bar_build_summary,
+        ),
         "sell_exit_scan": _serialize_step(
             result.sell_exit_scan,
             _serialize_sell_exit_scan_summary,
@@ -579,6 +714,10 @@ def _build_payload(
         "sell_execution": _serialize_step(
             result.sell_execution,
             _serialize_sell_execution_summary,
+        ),
+        "timing2_30s_trigger_scan": _serialize_step(
+            result.timing2_30s_trigger_scan,
+            _serialize_timing2_30s_trigger_scan_summary,
         ),
         "buy_trigger_scan": _serialize_step(
             result.buy_trigger_scan,
@@ -613,10 +752,13 @@ def _has_failed_step(result) -> bool:
         for step in (
             result.maintenance,
             result.intraday_bar_refresh,
+            result.timing2_price_sample_capture,
+            result.timing2_30s_bar_build,
             result.sell_exit_scan,
             result.sell_macd_scan,
             result.timing2_lot_exit_scan,
             result.sell_execution,
+            result.timing2_30s_trigger_scan,
             result.buy_trigger_scan,
             result.buy_execution,
         )
@@ -625,9 +767,9 @@ def _has_failed_step(result) -> bool:
 
 def main() -> int:
     args = _parse_args()
-    run_timing1, run_timing2 = _resolve_scan_selection(args)
 
     try:
+        run_timing1, run_timing2 = _resolve_scan_selection(args)
         _validate_positive_int("buy_signal_limit", args.buy_signal_limit)
         _validate_positive_int("sell_signal_limit", args.sell_signal_limit)
         _validate_positive_int("timeout_seconds", args.timeout_seconds)
@@ -636,6 +778,14 @@ def main() -> int:
         _validate_positive_int(
             "sell_macd_history_limit",
             args.sell_macd_history_limit,
+        )
+        _validate_positive_int(
+            "timing2_30s_min_samples_per_bar",
+            args.timing2_30s_min_samples_per_bar,
+        )
+        _validate_positive_int(
+            "timing2_max_sample_symbols_per_cycle",
+            args.timing2_max_sample_symbols_per_cycle,
         )
         if args.execute:
             _validate_positive_int("lock_lease_seconds", args.lock_lease_seconds)
@@ -684,6 +834,11 @@ def main() -> int:
             start_time=args.timing2_start_time,
             cutoff_time=args.timing2_cutoff_time,
         ).validated()
+        timing2_30s_trigger_settings = Timing2ThirtySecondTriggerSettings(
+            morning_start_time=args.timing2_30s_morning_start_time,
+            morning_end_time=args.timing2_30s_morning_end_time,
+            range_breakout_start_time=args.timing2_30s_range_breakout_start_time,
+        ).validated()
     except Exception as exc:
         _fail("startup", f"{type(exc).__name__}: {exc}")
         return 5
@@ -695,13 +850,29 @@ def main() -> int:
     lock_owner_id: str | None = None
     lock_acquired = False
     lock_released = False
+    timing2_setup_readiness: Timing2SetupSignalReadiness | None = None
 
     _section("Run Intraday Trading Cycle")
     _ok("mode", settings.mode)
     _ok("trade_date", args.trade_date)
     _ok("execute", str(args.execute))
+    _ok(
+        "buy_strategy",
+        selection_to_buy_strategy(
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
+        ),
+    )
     _ok("run_timing1", str(run_timing1))
     _ok("run_timing2", str(run_timing2))
+    _ok(
+        "timing2_30s_min_samples_per_bar",
+        str(args.timing2_30s_min_samples_per_bar),
+    )
+    _ok(
+        "timing2_max_sample_symbols_per_cycle",
+        str(args.timing2_max_sample_symbols_per_cycle),
+    )
     _ok("timeout_seconds", str(args.timeout_seconds))
     _ok("per_order_budget", str(args.per_order_budget))
     _ok("max_holdings", str(args.max_holdings))
@@ -731,6 +902,12 @@ def main() -> int:
             db_path,
             busy_timeout_ms=settings.db_busy_timeout_ms,
         )
+        timing2_setup_readiness = inspect_timing2_setup_signal_readiness(
+            signal_repo=SignalRepository(conn),
+            trade_date=args.trade_date,
+            run_timing2=run_timing2,
+        )
+        _print_timing2_setup_readiness(timing2_setup_readiness)
     except Exception as exc:
         _fail("db setup", f"{type(exc).__name__}: {exc}")
         if output_path is not None:
@@ -751,6 +928,13 @@ def main() -> int:
                     timing1_settings=timing1_settings,
                     timing1_daily_count=args.timing1_daily_count,
                     timing2_settings=timing2_settings,
+                    timing2_30s_trigger_settings=timing2_30s_trigger_settings,
+                    timing2_30s_min_samples_per_bar=(
+                        args.timing2_30s_min_samples_per_bar
+                    ),
+                    timing2_max_sample_symbols_per_cycle=(
+                        args.timing2_max_sample_symbols_per_cycle
+                    ),
                     buy_signal_limit=args.buy_signal_limit,
                     sell_signal_limit=args.sell_signal_limit,
                     lock_name=lock_name,
@@ -793,8 +977,18 @@ def main() -> int:
                             timing1_settings=timing1_settings,
                             timing1_daily_count=args.timing1_daily_count,
                             timing2_settings=timing2_settings,
+                            timing2_30s_trigger_settings=(
+                                timing2_30s_trigger_settings
+                            ),
+                            timing2_30s_min_samples_per_bar=(
+                                args.timing2_30s_min_samples_per_bar
+                            ),
+                            timing2_max_sample_symbols_per_cycle=(
+                                args.timing2_max_sample_symbols_per_cycle
+                            ),
                             buy_signal_limit=args.buy_signal_limit,
                             sell_signal_limit=args.sell_signal_limit,
+                            timing2_setup_readiness=timing2_setup_readiness,
                             lock_name=lock_name,
                             lock_owner_id=lock_owner_id,
                             error_type=type(exc).__name__,
@@ -808,6 +1002,7 @@ def main() -> int:
             order_repo = OrderRepository(conn)
             position_repo = PositionRepository(conn)
             execution_repo = ExecutionRepository(conn)
+            current_price_sample_repo = CurrentPriceSampleRepository(conn)
             intraday_bar_repo = IntradayBar15mRepository(conn)
             intraday_bar_30s_repo = IntradayBar30sRepository(conn)
             entry_lot_repo = EntryLotRepository(conn)
@@ -854,6 +1049,22 @@ def main() -> int:
                     position_repo=position_repo,
                     intraday_bar_repo=intraday_bar_repo,
                 ),
+                timing2_price_sample_capture_service=(
+                    Timing2PriceSampleCaptureService(
+                        broker=broker,
+                        conn=conn,
+                        signal_repo=signal_repo,
+                        sample_repo=current_price_sample_repo,
+                    )
+                ),
+                timing2_30s_bar_build_service=(
+                    Timing2ThirtySecondBarBuildService(
+                        conn=conn,
+                        signal_repo=signal_repo,
+                        sample_repo=current_price_sample_repo,
+                        intraday_bar_repo=intraday_bar_30s_repo,
+                    )
+                ),
                 sell_exit_scan_service=SellExitScanService(
                     broker=broker,
                     conn=conn,
@@ -882,6 +1093,11 @@ def main() -> int:
                     order_service=order_service,
                     risk_guard_service=risk_guard_service,
                     entry_lot_repo=entry_lot_repo,
+                ),
+                timing2_30s_trigger_service=Timing2ThirtySecondTriggerService(
+                    conn=conn,
+                    signal_repo=signal_repo,
+                    intraday_bar_repo=intraday_bar_30s_repo,
                 ),
                 buy_trigger_scan_service=IntradayTriggerCombinedScanService(
                     broker=broker,
@@ -913,6 +1129,13 @@ def main() -> int:
                 timing1_settings=timing1_settings,
                 timing1_daily_count=args.timing1_daily_count,
                 timing2_settings=timing2_settings,
+                timing2_30s_trigger_settings=timing2_30s_trigger_settings,
+                timing2_30s_min_samples_per_bar=(
+                    args.timing2_30s_min_samples_per_bar
+                ),
+                timing2_max_sample_symbols_per_cycle=(
+                    args.timing2_max_sample_symbols_per_cycle
+                ),
                 buy_execution_settings=buy_execution_settings,
                 buy_signal_limit=args.buy_signal_limit,
                 record_scan_signals=args.execute,
@@ -926,6 +1149,16 @@ def main() -> int:
             result.intraday_bar_refresh,
             _serialize_intraday_bar_refresh_summary,
         )
+        _print_step(
+            "Timing2 Price Sample Capture",
+            result.timing2_price_sample_capture,
+            _serialize_timing2_price_sample_capture_summary,
+        )
+        _print_step(
+            "Timing2 30s Bar Build",
+            result.timing2_30s_bar_build,
+            _serialize_timing2_30s_bar_build_summary,
+        )
         _print_step("Sell Exit Scan", result.sell_exit_scan, _serialize_sell_exit_scan_summary)
         _print_step("Sell MACD Scan", result.sell_macd_scan, _serialize_sell_macd_scan_summary)
         _print_step(
@@ -934,6 +1167,11 @@ def main() -> int:
             _serialize_timing2_lot_exit_scan_summary,
         )
         _print_step("Sell Execution", result.sell_execution, _serialize_sell_execution_summary)
+        _print_step(
+            "Timing2 30s Trigger Scan",
+            result.timing2_30s_trigger_scan,
+            _serialize_timing2_30s_trigger_scan_summary,
+        )
         _print_step("Buy Trigger Scan", result.buy_trigger_scan, _serialize_buy_trigger_summary)
         _print_step("Buy Execution", result.buy_execution, _serialize_buy_execution_summary)
 
@@ -958,9 +1196,17 @@ def main() -> int:
                     timing1_settings=timing1_settings,
                     timing1_daily_count=args.timing1_daily_count,
                     timing2_settings=timing2_settings,
+                    timing2_30s_trigger_settings=timing2_30s_trigger_settings,
+                    timing2_30s_min_samples_per_bar=(
+                        args.timing2_30s_min_samples_per_bar
+                    ),
+                    timing2_max_sample_symbols_per_cycle=(
+                        args.timing2_max_sample_symbols_per_cycle
+                    ),
                     buy_signal_limit=args.buy_signal_limit,
                     sell_signal_limit=args.sell_signal_limit,
                     result=result,
+                    timing2_setup_readiness=timing2_setup_readiness,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,
@@ -996,8 +1242,16 @@ def main() -> int:
                     timing1_settings=timing1_settings,
                     timing1_daily_count=args.timing1_daily_count,
                     timing2_settings=timing2_settings,
+                    timing2_30s_trigger_settings=timing2_30s_trigger_settings,
+                    timing2_30s_min_samples_per_bar=(
+                        args.timing2_30s_min_samples_per_bar
+                    ),
+                    timing2_max_sample_symbols_per_cycle=(
+                        args.timing2_max_sample_symbols_per_cycle
+                    ),
                     buy_signal_limit=args.buy_signal_limit,
                     sell_signal_limit=args.sell_signal_limit,
+                    timing2_setup_readiness=timing2_setup_readiness,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,

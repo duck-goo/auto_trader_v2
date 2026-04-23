@@ -53,6 +53,7 @@ class Timing2PriceSampleCaptureResult:
     captured_at: str
     setup_signal_count: int
     candidate_count: int
+    skipped_by_limit_count: int
     preview_ready_count: int
     captured_count: int
     failed_count: int
@@ -92,21 +93,36 @@ class Timing2PriceSampleCaptureService:
         *,
         trade_date: str,
         write_samples: bool = False,
+        max_symbols: int | None = None,
     ) -> Timing2PriceSampleCaptureResult:
+        normalized_max_symbols = self._require_optional_positive_int(
+            "max_symbols",
+            max_symbols,
+        )
         setup_signals = self._load_setup_signal_map(trade_date=trade_date)
         if not setup_signals:
             raise ServiceError(
                 f"Timing2 setup signals are missing for trade_date={trade_date!r}."
             )
 
+        setup_items = list(setup_signals.items())
+        if normalized_max_symbols is None:
+            selected_items = setup_items
+        else:
+            selected_items = setup_items[:normalized_max_symbols]
+        skipped_by_limit_count = len(setup_items) - len(selected_items)
+
         captured_at = self._now_fn().astimezone(_KST).isoformat()
         candidates: list[Timing2PriceSampleCaptureCandidate] = []
         _log.info(
             f"[timing2_price_sample_capture:start] trade_date={trade_date} "
-            f"setup_signal_count={len(setup_signals)} write_samples={write_samples}"
+            f"setup_signal_count={len(setup_signals)} "
+            f"selected_count={len(selected_items)} "
+            f"skipped_by_limit_count={skipped_by_limit_count} "
+            f"max_symbols={normalized_max_symbols} write_samples={write_samples}"
         )
 
-        for symbol, setup_signal in setup_signals.items():
+        for symbol, setup_signal in selected_items:
             setup_payload = self._require_payload_dict(
                 setup_signal,
                 strategy_name=STRATEGY_NAME_TIMING2_SETUP,
@@ -210,6 +226,7 @@ class Timing2PriceSampleCaptureService:
         _log.info(
             f"[timing2_price_sample_capture:done] trade_date={trade_date} "
             f"candidate_count={len(candidates)} "
+            f"skipped_by_limit_count={skipped_by_limit_count} "
             f"preview_ready_count={preview_ready_count} "
             f"captured_count={captured_count} failed_count={failed_count}"
         )
@@ -218,6 +235,7 @@ class Timing2PriceSampleCaptureService:
             captured_at=captured_at,
             setup_signal_count=len(setup_signals),
             candidate_count=len(candidates),
+            skipped_by_limit_count=skipped_by_limit_count,
             preview_ready_count=preview_ready_count,
             captured_count=captured_count,
             failed_count=failed_count,
@@ -300,3 +318,11 @@ class Timing2PriceSampleCaptureService:
                 f"id={signal_id}, field={field_name!r}"
             )
         return value.strip()
+
+    @staticmethod
+    def _require_optional_positive_int(name: str, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer or None: {value!r}")
+        return value

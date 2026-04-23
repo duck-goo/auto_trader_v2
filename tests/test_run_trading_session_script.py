@@ -177,6 +177,41 @@ def test_main_execute_success_runs_preopen_then_polling_and_passes_risk_flags(
         polling_command[polling_command.index("--timing2-lot-sell-cost-rate") + 1]
         == str(target.DEFAULT_TIMING2_SELL_COST_RATE)
     )
+    assert "--timing2-30s-min-samples-per-bar" in polling_command
+    assert (
+        polling_command[
+            polling_command.index("--timing2-30s-min-samples-per-bar") + 1
+        ]
+        == "2"
+    )
+    assert "--timing2-max-sample-symbols-per-cycle" in polling_command
+    assert (
+        polling_command[
+            polling_command.index("--timing2-max-sample-symbols-per-cycle") + 1
+        ]
+        == "30"
+    )
+    assert "--timing2-30s-morning-start-time" in polling_command
+    assert (
+        polling_command[
+            polling_command.index("--timing2-30s-morning-start-time") + 1
+        ]
+        == "09:00:00"
+    )
+    assert "--timing2-30s-morning-end-time" in polling_command
+    assert (
+        polling_command[
+            polling_command.index("--timing2-30s-morning-end-time") + 1
+        ]
+        == "10:00:00"
+    )
+    assert "--timing2-30s-range-breakout-start-time" in polling_command
+    assert (
+        polling_command[
+            polling_command.index("--timing2-30s-range-breakout-start-time") + 1
+        ]
+        == "10:00:00"
+    )
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["trade_date"] == TRADE_DATE
@@ -292,3 +327,91 @@ def test_main_surfaces_polling_block_reason_in_session_payload(
     assert payload["session_reason"] == "MAX_DAILY_LOSS_REACHED"
     assert payload["polling_started"] is True
     assert payload["polling_exit_code"] == 4
+
+
+def test_main_forwards_buy_strategy_to_polling_and_payload(
+    test_db_path,
+    monkeypatch,
+):
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_buy_strategy.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=[
+            "--preopen-scan-timing2-setup",
+            "--preopen-write-timing2-signals",
+            "--buy-strategy",
+            "timing2",
+        ],
+    )
+
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(target, "load_settings", lambda: _make_settings(test_db_path))
+    monkeypatch.setattr(target, "setup_logging", lambda settings: None)
+    _install_fixed_tempdir(
+        monkeypatch,
+        test_db_path=test_db_path,
+        suffix="session_temp_buy_strategy",
+    )
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "prepare_preopen_universe.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "readiness_outcome": "READY",
+                    "readiness_reason": None,
+                },
+            )
+            return 0
+        if script_name == "run_intraday_trading_polling.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "stop_reason": "MAX_CYCLES_REACHED",
+                },
+            )
+            return 0
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    polling_command = commands[1]
+    assert "--buy-strategy" in polling_command
+    assert polling_command[polling_command.index("--buy-strategy") + 1] == "timing2"
+    assert "--scan-timing1" not in polling_command
+    assert "--scan-timing2" not in polling_command
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["buy_strategy"] == "timing2"
+    assert payload["run_timing1"] is False
+    assert payload["run_timing2"] is True
+
+
+def test_main_rejects_explicit_timing2_without_preopen_setup_signals(
+    test_db_path,
+    monkeypatch,
+):
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_buy_strategy_missing_setup.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=["--buy-strategy", "timing2"],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 5
+    assert not output_path.exists()

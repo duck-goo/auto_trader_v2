@@ -186,6 +186,41 @@ def test_capture_isolates_per_symbol_broker_failure(conn):
     ) == 1
 
 
+def test_capture_respects_max_symbols_without_fetching_skipped_symbols(conn):
+    signal_repo = SignalRepository(conn)
+    sample_repo = CurrentPriceSampleRepository(conn)
+    _record_setup_signal(conn, signal_repo, symbol="111111")
+    _record_setup_signal(conn, signal_repo, symbol="222222")
+    _record_setup_signal(conn, signal_repo, symbol="333333")
+
+    broker = _FakeBroker(
+        {
+            "111111": _snapshot("111111"),
+            "222222": _snapshot("222222"),
+            "333333": _snapshot("333333"),
+        }
+    )
+    service = Timing2PriceSampleCaptureService(
+        broker=broker,
+        conn=conn,
+        signal_repo=signal_repo,
+        sample_repo=sample_repo,
+        now_fn=lambda: CAPTURE_TIME,
+    )
+
+    result = service.capture(
+        trade_date="2026-04-16",
+        write_samples=True,
+        max_symbols=2,
+    )
+
+    assert result.setup_signal_count == 3
+    assert result.candidate_count == 2
+    assert result.skipped_by_limit_count == 1
+    assert result.captured_count == 2
+    assert len(broker.calls) == 2
+
+
 def test_capture_rejects_snapshot_for_different_trade_date(conn):
     signal_repo = SignalRepository(conn)
     sample_repo = CurrentPriceSampleRepository(conn)

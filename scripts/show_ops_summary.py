@@ -22,6 +22,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+TIMING2_30S_STEP_NAMES = (
+    "timing2_price_sample_capture",
+    "timing2_30s_bar_build",
+    "timing2_30s_trigger_scan",
+)
+
 
 def _section(title: str) -> None:
     print()
@@ -115,6 +121,71 @@ def _coerce_step_result(step: dict[str, Any]) -> dict[str, Any] | None:
     return _load_json(path)
 
 
+def _coerce_step_status(cycle: dict[str, Any], step_name: str) -> dict[str, Any]:
+    step = cycle.get(step_name)
+    if not isinstance(step, dict):
+        return {
+            "present": False,
+            "outcome": None,
+            "reason": None,
+            "summary": None,
+        }
+    return {
+        "present": True,
+        "outcome": step.get("outcome"),
+        "reason": step.get("reason"),
+        "summary": step.get("summary") if isinstance(step.get("summary"), dict) else None,
+    }
+
+
+def _build_timing2_30s_pipeline_summary(
+    polling_result: Any,
+) -> dict[str, Any]:
+    if not isinstance(polling_result, dict):
+        return {
+            "cycle_found": False,
+            "cycle_no": None,
+            "all_steps_present": False,
+            "all_steps_completed": False,
+            "steps": {},
+        }
+
+    cycles = polling_result.get("cycles")
+    if not isinstance(cycles, list) or not cycles:
+        return {
+            "cycle_found": False,
+            "cycle_no": None,
+            "all_steps_present": False,
+            "all_steps_completed": False,
+            "steps": {},
+        }
+
+    first_cycle = cycles[0]
+    if not isinstance(first_cycle, dict):
+        return {
+            "cycle_found": False,
+            "cycle_no": None,
+            "all_steps_present": False,
+            "all_steps_completed": False,
+            "steps": {},
+        }
+
+    steps = {
+        step_name: _coerce_step_status(first_cycle, step_name)
+        for step_name in TIMING2_30S_STEP_NAMES
+    }
+    return {
+        "cycle_found": True,
+        "cycle_no": first_cycle.get("cycle_no"),
+        "all_steps_present": all(row["present"] for row in steps.values()),
+        "all_steps_completed": all(
+            row["present"] and row["outcome"] == "COMPLETED"
+            for row in steps.values()
+        ),
+        "steps": steps,
+    }
+
+
 def _build_startup_summary(step: dict[str, Any]) -> dict[str, Any]:
     result = _coerce_step_result(step) or {}
     unresolved_orders = result.get("unresolved_orders")
@@ -181,6 +252,9 @@ def _build_trading_summary(step: dict[str, Any]) -> dict[str, Any]:
             None
             if not isinstance(polling_result, dict)
             else polling_result.get("stop_reason")
+        ),
+        "timing2_30s_pipeline": _build_timing2_30s_pipeline_summary(
+            polling_result
         ),
         "output_path": step.get("output_path"),
     }
@@ -252,6 +326,7 @@ def _build_normalized_payload(summary_path: Path, payload: dict[str, Any]) -> di
         "overall_reason": payload.get("overall_reason"),
         "include_after_close": payload.get("include_after_close"),
         "intraday_window": payload.get("intraday_window"),
+        "scan_settings": payload.get("scan_settings"),
         "steps": normalized_steps,
     }
 
@@ -274,6 +349,22 @@ def _print_trading_summary(step: dict[str, Any]) -> None:
     _ok("preopen_readiness_reason", "" if step.get("preopen_readiness_reason") is None else str(step.get("preopen_readiness_reason")))
     _ok("polling_started", str(step.get("polling_started")))
     _ok("polling_stop_reason", "" if step.get("polling_stop_reason") is None else str(step.get("polling_stop_reason")))
+    pipeline = step.get("timing2_30s_pipeline")
+    if not isinstance(pipeline, dict) or not pipeline.get("cycle_found"):
+        return
+    _ok("timing2_30s_cycle_no", str(pipeline.get("cycle_no")))
+    _ok("timing2_30s_all_steps_present", str(pipeline.get("all_steps_present")))
+    _ok("timing2_30s_all_steps_completed", str(pipeline.get("all_steps_completed")))
+    steps = pipeline.get("steps")
+    if not isinstance(steps, dict):
+        return
+    for step_name in TIMING2_30S_STEP_NAMES:
+        row = steps.get(step_name)
+        if not isinstance(row, dict):
+            continue
+        _ok(f"{step_name}_outcome", str(row.get("outcome")))
+        if row.get("reason"):
+            _warn(f"{step_name}_reason", str(row.get("reason")))
 
 
 def _print_after_close_summary(step: dict[str, Any]) -> None:

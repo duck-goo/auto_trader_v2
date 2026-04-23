@@ -37,7 +37,15 @@ from services import RuntimeLockBusyError, RuntimeLockService
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import RuntimeLockRepository
-from strategy import DEFAULT_TIMING2_SELL_COST_RATE
+from strategy import (
+    BUY_STRATEGY_CHOICES,
+    BUY_STRATEGY_BOTH,
+    BUY_STRATEGY_TIMING2,
+    DEFAULT_TIMING2_SELL_COST_RATE,
+    Timing2ThirtySecondTriggerSettings,
+    resolve_buy_strategy_selection,
+    selection_to_buy_strategy,
+)
 
 KST = pytz.timezone("Asia/Seoul")
 DEFAULT_POLLING_LOCK_PREFIX = "intraday_trading_polling"
@@ -191,6 +199,15 @@ def _parse_args() -> argparse.Namespace:
         help="Run timing2 intraday trigger scan during polling.",
     )
     parser.add_argument(
+        "--buy-strategy",
+        choices=BUY_STRATEGY_CHOICES,
+        default=None,
+        help=(
+            "Buy strategy selection for future UI controls. "
+            "Choices: timing1, timing2, both. Default: legacy scan flags, or both."
+        ),
+    )
+    parser.add_argument(
         "--per-order-budget",
         type=int,
         required=True,
@@ -300,6 +317,33 @@ def _parse_args() -> argparse.Namespace:
             "Timing2 lot combined sell fee/tax ratio. "
             f"Default: {DEFAULT_TIMING2_SELL_COST_RATE}"
         ),
+    )
+    parser.add_argument(
+        "--timing2-30s-min-samples-per-bar",
+        type=int,
+        default=2,
+        help="Minimum samples required to build one Timing2 30s bar. Default: 2",
+    )
+    parser.add_argument(
+        "--timing2-max-sample-symbols-per-cycle",
+        type=int,
+        default=30,
+        help="Max Timing2 symbols to sample per cycle. Default: 30",
+    )
+    parser.add_argument(
+        "--timing2-30s-morning-start-time",
+        default="09:00:00",
+        help="Timing2 30s morning pattern start time HH:MM:SS. Default: 09:00:00",
+    )
+    parser.add_argument(
+        "--timing2-30s-morning-end-time",
+        default="10:00:00",
+        help="Timing2 30s morning pattern end time HH:MM:SS. Default: 10:00:00",
+    )
+    parser.add_argument(
+        "--timing2-30s-range-breakout-start-time",
+        default="10:00:00",
+        help="Timing2 30s range breakout start time HH:MM:SS. Default: 10:00:00",
     )
     parser.add_argument(
         "--buy-start-time",
@@ -460,6 +504,40 @@ def _append_repeatable_option(
         command.extend([flag, value])
 
 
+def _resolve_scan_selection(args: argparse.Namespace) -> tuple[bool, bool]:
+    return resolve_buy_strategy_selection(
+        buy_strategy=args.buy_strategy,
+        scan_timing1=args.scan_timing1,
+        scan_timing2=args.scan_timing2,
+    )
+
+
+def _explicit_timing2_intraday_requested(args: argparse.Namespace) -> bool:
+    return args.scan_timing2 or args.buy_strategy in (
+        BUY_STRATEGY_TIMING2,
+        BUY_STRATEGY_BOTH,
+    )
+
+
+def _check_timing2_preopen_setup_args(args: argparse.Namespace) -> None:
+    if args.preopen_write_timing2_signals and not args.preopen_scan_timing2_setup:
+        raise ValueError(
+            "--preopen-write-timing2-signals requires --preopen-scan-timing2-setup."
+        )
+
+    if not _explicit_timing2_intraday_requested(args):
+        return
+
+    if args.preopen_scan_timing2_setup and args.preopen_write_timing2_signals:
+        return
+
+    raise ValueError(
+        "Explicit Timing2 selection requires --preopen-scan-timing2-setup "
+        "and --preopen-write-timing2-signals so setup candidates are persisted "
+        "before polling starts."
+    )
+
+
 def _build_preopen_command(
     *,
     args: argparse.Namespace,
@@ -531,6 +609,7 @@ def _build_polling_command(
     db_path: str,
     output_path: Path,
 ) -> list[str]:
+    _resolve_scan_selection(args)
     command = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "run_intraday_trading_polling.py"),
@@ -568,6 +647,16 @@ def _build_polling_command(
         str(args.timing2_lot_partial_take_profit_percent),
         "--timing2-lot-sell-cost-rate",
         str(args.timing2_lot_sell_cost_rate),
+        "--timing2-30s-min-samples-per-bar",
+        str(args.timing2_30s_min_samples_per_bar),
+        "--timing2-max-sample-symbols-per-cycle",
+        str(args.timing2_max_sample_symbols_per_cycle),
+        "--timing2-30s-morning-start-time",
+        args.timing2_30s_morning_start_time,
+        "--timing2-30s-morning-end-time",
+        args.timing2_30s_morning_end_time,
+        "--timing2-30s-range-breakout-start-time",
+        args.timing2_30s_range_breakout_start_time,
         "--buy-start-time",
         args.buy_start_time,
         "--buy-cutoff-time",
@@ -613,9 +702,11 @@ def _build_polling_command(
                 str(args.max_daily_loss),
             ]
         )
-    if args.scan_timing1:
+    if args.buy_strategy is not None:
+        command.extend(["--buy-strategy", args.buy_strategy])
+    elif args.scan_timing1:
         command.append("--scan-timing1")
-    if args.scan_timing2:
+    if args.buy_strategy is None and args.scan_timing2:
         command.append("--scan-timing2")
     if args.execute:
         command.append("--execute")
@@ -652,10 +743,16 @@ def _build_payload(
     polling_started: bool,
     polling_lock_name: str,
     output_path: Path | None,
+    buy_strategy: str | None = None,
+    run_timing1: bool | None = None,
+    run_timing2: bool | None = None,
 ) -> dict[str, Any]:
     return {
         "trade_date": trade_date,
         "execute_mode": execute_mode,
+        "buy_strategy": buy_strategy,
+        "run_timing1": run_timing1,
+        "run_timing2": run_timing2,
         "started_at": started_at,
         "finished_at": finished_at,
         "session_outcome": session_outcome,
@@ -722,6 +819,8 @@ def main() -> int:
 
     try:
         _check_master_source_args(args)
+        run_timing1, run_timing2 = _resolve_scan_selection(args)
+        _check_timing2_preopen_setup_args(args)
         _validate_positive_int("daily_count", args.daily_count)
         _validate_positive_int("min_price", args.min_price)
         _validate_positive_int("max_price", args.max_price)
@@ -768,6 +867,19 @@ def main() -> int:
             "sell_macd_history_limit",
             args.sell_macd_history_limit,
         )
+        _validate_positive_int(
+            "timing2_30s_min_samples_per_bar",
+            args.timing2_30s_min_samples_per_bar,
+        )
+        _validate_positive_int(
+            "timing2_max_sample_symbols_per_cycle",
+            args.timing2_max_sample_symbols_per_cycle,
+        )
+        Timing2ThirtySecondTriggerSettings(
+            morning_start_time=args.timing2_30s_morning_start_time,
+            morning_end_time=args.timing2_30s_morning_end_time,
+            range_breakout_start_time=args.timing2_30s_range_breakout_start_time,
+        ).validated()
         _validate_positive_int("timing1_daily_count", args.timing1_daily_count)
         _validate_positive_int("interval_seconds", args.interval_seconds)
         _validate_positive_int("max_cycles", args.max_cycles, allow_zero=True)
@@ -800,6 +912,13 @@ def main() -> int:
     _ok("mode", settings.mode)
     _ok("trade_date", args.trade_date)
     _ok("execute", str(args.execute))
+    _ok(
+        "buy_strategy",
+        selection_to_buy_strategy(
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
+        ),
+    )
     _ok("db_path", str(db_path))
     _ok("polling_lock_name", polling_lock_name)
     _ok(
@@ -853,6 +972,12 @@ def main() -> int:
                 polling_started=False,
                 polling_lock_name=polling_lock_name,
                 output_path=output_path,
+                buy_strategy=selection_to_buy_strategy(
+                    run_timing1=run_timing1,
+                    run_timing2=run_timing2,
+                ),
+                run_timing1=run_timing1,
+                run_timing2=run_timing2,
             )
             _save_json(output_path, payload)
             _ok("json_saved", str(output_path))
@@ -876,6 +1001,12 @@ def main() -> int:
                 polling_started=False,
                 polling_lock_name=polling_lock_name,
                 output_path=output_path,
+                buy_strategy=selection_to_buy_strategy(
+                    run_timing1=run_timing1,
+                    run_timing2=run_timing2,
+                ),
+                run_timing1=run_timing1,
+                run_timing2=run_timing2,
             )
             _save_json(output_path, payload)
             _ok("json_saved", str(output_path))
@@ -978,6 +1109,12 @@ def main() -> int:
             polling_started=polling_started,
             polling_lock_name=polling_lock_name,
             output_path=output_path,
+            buy_strategy=selection_to_buy_strategy(
+                run_timing1=run_timing1,
+                run_timing2=run_timing2,
+            ),
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
         )
         _save_json(output_path, payload)
         _ok("json_saved", str(output_path))

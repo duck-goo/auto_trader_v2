@@ -31,6 +31,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config.loader import load_settings
 from logger import setup_logging
+from strategy import (
+    BUY_STRATEGY_CHOICES,
+    BUY_STRATEGY_BOTH,
+    BUY_STRATEGY_TIMING2,
+    resolve_buy_strategy_selection,
+    selection_to_buy_strategy,
+)
 
 KST = pytz.timezone("Asia/Seoul")
 
@@ -114,6 +121,28 @@ def _parse_args() -> argparse.Namespace:
         help="Optional max realized daily loss in KRW.",
     )
     parser.add_argument(
+        "--preopen-scan-timing2-setup",
+        action="store_true",
+        help="Run timing2 daily setup scan during the preopen part of the rehearsal.",
+    )
+    parser.add_argument(
+        "--preopen-write-timing2-signals",
+        action="store_true",
+        help="Persist timing2 setup signals during the preopen part of the rehearsal.",
+    )
+    parser.add_argument(
+        "--preopen-timing2-daily-count",
+        type=int,
+        default=90,
+        help="Daily candle count for timing2 setup scan. Default: 90",
+    )
+    parser.add_argument(
+        "--preopen-timing2-new-high-lookback-days",
+        type=int,
+        default=60,
+        help="Timing2 setup new-high lookback window. Default: 60",
+    )
+    parser.add_argument(
         "--scan-timing1",
         action="store_true",
         help="Also run timing1 intraday trigger scan during the one-cycle preview.",
@@ -122,6 +151,27 @@ def _parse_args() -> argparse.Namespace:
         "--scan-timing2",
         action="store_true",
         help="Also run timing2 intraday trigger scan during the one-cycle preview.",
+    )
+    parser.add_argument(
+        "--buy-strategy",
+        choices=BUY_STRATEGY_CHOICES,
+        default=None,
+        help=(
+            "Buy strategy selection for future UI controls. "
+            "Choices: timing1, timing2, both. Default: legacy scan flags, or both."
+        ),
+    )
+    parser.add_argument(
+        "--timing2-30s-min-samples-per-bar",
+        type=int,
+        default=2,
+        help="Minimum samples required to build one Timing2 30s bar. Default: 2",
+    )
+    parser.add_argument(
+        "--timing2-max-sample-symbols-per-cycle",
+        type=int,
+        default=30,
+        help="Max Timing2 symbols to sample per cycle. Default: 30",
     )
     parser.add_argument(
         "--include-after-close",
@@ -239,6 +289,61 @@ def _build_quick_window(
     }
 
 
+def _build_scan_settings_payload(args: argparse.Namespace) -> dict[str, Any]:
+    run_timing1, run_timing2 = _resolve_scan_selection(args)
+    return {
+        "buy_strategy": args.buy_strategy,
+        "effective_buy_strategy": selection_to_buy_strategy(
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
+        ),
+        "scan_timing1": args.scan_timing1,
+        "scan_timing2": args.scan_timing2,
+        "preopen_scan_timing2_setup": args.preopen_scan_timing2_setup,
+        "preopen_write_timing2_signals": args.preopen_write_timing2_signals,
+        "preopen_timing2_daily_count": args.preopen_timing2_daily_count,
+        "preopen_timing2_new_high_lookback_days": (
+            args.preopen_timing2_new_high_lookback_days
+        ),
+        "timing2_30s_min_samples_per_bar": args.timing2_30s_min_samples_per_bar,
+        "timing2_max_sample_symbols_per_cycle": args.timing2_max_sample_symbols_per_cycle,
+    }
+
+
+def _resolve_scan_selection(args: argparse.Namespace) -> tuple[bool, bool]:
+    return resolve_buy_strategy_selection(
+        buy_strategy=args.buy_strategy,
+        scan_timing1=args.scan_timing1,
+        scan_timing2=args.scan_timing2,
+    )
+
+
+def _explicit_timing2_intraday_requested(args: argparse.Namespace) -> bool:
+    return args.scan_timing2 or args.buy_strategy in (
+        BUY_STRATEGY_TIMING2,
+        BUY_STRATEGY_BOTH,
+    )
+
+
+def _check_timing2_preopen_setup_args(args: argparse.Namespace) -> None:
+    if args.preopen_write_timing2_signals and not args.preopen_scan_timing2_setup:
+        raise ValueError(
+            "--preopen-write-timing2-signals requires --preopen-scan-timing2-setup."
+        )
+
+    if not _explicit_timing2_intraday_requested(args):
+        return
+
+    if args.preopen_scan_timing2_setup and args.preopen_write_timing2_signals:
+        return
+
+    raise ValueError(
+        "Explicit Timing2 selection requires --preopen-scan-timing2-setup "
+        "and --preopen-write-timing2-signals so setup candidates are persisted "
+        "before the rehearsal trading session starts."
+    )
+
+
 def _run_child(command: list[str]) -> int:
     completed = subprocess.run(
         command,
@@ -304,6 +409,10 @@ def _build_trading_session_command(
         quick_window["start_time"],
         "--timing2-cutoff-time",
         quick_window["cutoff_time"],
+        "--timing2-30s-min-samples-per-bar",
+        str(args.timing2_30s_min_samples_per_bar),
+        "--timing2-max-sample-symbols-per-cycle",
+        str(args.timing2_max_sample_symbols_per_cycle),
         "--db-path",
         db_path,
         "--output",
@@ -317,12 +426,26 @@ def _build_trading_session_command(
         command.append("--require-same-day-master")
     if args.allow_unresolved_orders:
         command.append("--allow-unresolved-orders")
+    if args.preopen_scan_timing2_setup:
+        command.append("--preopen-scan-timing2-setup")
+    if args.preopen_write_timing2_signals:
+        command.append("--preopen-write-timing2-signals")
+    command.extend(
+        [
+            "--preopen-timing2-daily-count",
+            str(args.preopen_timing2_daily_count),
+            "--preopen-timing2-new-high-lookback-days",
+            str(args.preopen_timing2_new_high_lookback_days),
+        ]
+    )
     if args.max_daily_order_count is not None:
         command.extend(
             ["--max-daily-order-count", str(args.max_daily_order_count)]
         )
     if args.max_daily_loss is not None:
         command.extend(["--max-daily-loss", str(args.max_daily_loss)])
+    if args.buy_strategy is not None:
+        command.extend(["--buy-strategy", args.buy_strategy])
     if args.scan_timing1:
         command.append("--scan-timing1")
     if args.scan_timing2:
@@ -385,6 +508,7 @@ def _startup_step_outcome(
 
 def _session_step_outcome(
     *,
+    args: argparse.Namespace,
     exit_code: int,
     payload: dict[str, Any] | None,
 ) -> tuple[str, str | None]:
@@ -393,6 +517,12 @@ def _session_step_outcome(
     outcome = _optional_text(payload.get("session_outcome"))
     reason = _optional_text(payload.get("session_reason"))
     if exit_code == 0 and outcome == "COMPLETED":
+        timing2_validation_error = _validate_timing2_30s_rehearsal_payload(
+            args=args,
+            payload=payload,
+        )
+        if timing2_validation_error is not None:
+            return "FAILED", timing2_validation_error
         return "COMPLETED", None
     if exit_code == 4 or outcome in (
         "PREOPEN_BLOCKED",
@@ -434,12 +564,69 @@ def _optional_text(value: Any) -> str | None:
     return text
 
 
+def _validate_timing2_30s_rehearsal_payload(
+    *,
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+) -> str | None:
+    if not _timing2_validation_requested(args):
+        return None
+
+    polling_result = payload.get("polling_result")
+    if not isinstance(polling_result, dict):
+        return "Timing2 rehearsal result is missing polling_result."
+
+    cycles = polling_result.get("cycles")
+    if not isinstance(cycles, list) or not cycles:
+        return "Timing2 rehearsal result has no polling cycles."
+
+    first_cycle = cycles[0]
+    if not isinstance(first_cycle, dict):
+        return "Timing2 rehearsal polling cycle payload is invalid."
+
+    required_steps = (
+        "timing2_price_sample_capture",
+        "timing2_30s_bar_build",
+        "timing2_30s_trigger_scan",
+    )
+    missing_steps = [
+        step_name for step_name in required_steps if step_name not in first_cycle
+    ]
+    if missing_steps:
+        return (
+            "Timing2 rehearsal is missing 30-second pipeline steps: "
+            + ", ".join(missing_steps)
+        )
+    return None
+
+
+def _timing2_validation_requested(args: argparse.Namespace) -> bool:
+    return args.scan_timing2 or args.buy_strategy in ("timing2", "both")
+
+
 def main() -> int:
     args = _parse_args()
 
     try:
         _validate_positive_int("per_order_budget", args.per_order_budget)
         _validate_positive_int("max_holdings", args.max_holdings)
+        run_timing1, run_timing2 = _resolve_scan_selection(args)
+        _validate_positive_int(
+            "preopen_timing2_daily_count",
+            args.preopen_timing2_daily_count,
+        )
+        _validate_positive_int(
+            "preopen_timing2_new_high_lookback_days",
+            args.preopen_timing2_new_high_lookback_days,
+        )
+        _validate_positive_int(
+            "timing2_30s_min_samples_per_bar",
+            args.timing2_30s_min_samples_per_bar,
+        )
+        _validate_positive_int(
+            "timing2_max_sample_symbols_per_cycle",
+            args.timing2_max_sample_symbols_per_cycle,
+        )
         if args.max_daily_order_count is not None:
             _validate_positive_int(
                 "max_daily_order_count",
@@ -452,6 +639,7 @@ def main() -> int:
             args.rehearsal_window_seconds,
         )
         master_source_type, master_source_value = _resolve_master_source(args)
+        _check_timing2_preopen_setup_args(args)
 
         settings = load_settings()
         setup_logging(settings)
@@ -493,6 +681,23 @@ def main() -> int:
         _ok("master_input", master_source_value)
     _ok("output_dir", str(output_dir))
     _ok("include_after_close", str(args.include_after_close))
+    _ok(
+        "buy_strategy",
+        selection_to_buy_strategy(
+            run_timing1=run_timing1,
+            run_timing2=run_timing2,
+        ),
+    )
+    _ok("preopen_scan_timing2_setup", str(args.preopen_scan_timing2_setup))
+    _ok("preopen_write_timing2_signals", str(args.preopen_write_timing2_signals))
+    _ok(
+        "timing2_30s_min_samples_per_bar",
+        str(args.timing2_30s_min_samples_per_bar),
+    )
+    _ok(
+        "timing2_max_sample_symbols_per_cycle",
+        str(args.timing2_max_sample_symbols_per_cycle),
+    )
     _ok("quick_start_time", quick_window["start_time"])
     _ok("quick_cutoff_time", quick_window["cutoff_time"])
     _warn(
@@ -545,6 +750,7 @@ def main() -> int:
         trading_exit_code = _run_child(trading_command)
         trading_result = _load_json(trading_output_path)
         trading_step_outcome, trading_reason = _session_step_outcome(
+            args=args,
             exit_code=trading_exit_code,
             payload=trading_result,
         )
@@ -617,6 +823,7 @@ def main() -> int:
         "include_after_close": args.include_after_close,
         "rehearsal_window_seconds": args.rehearsal_window_seconds,
         "intraday_window": quick_window,
+        "scan_settings": _build_scan_settings_payload(args),
         "output_dir": str(output_dir),
         "overall_outcome": overall_outcome,
         "overall_reason": overall_reason,

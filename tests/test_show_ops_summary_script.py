@@ -39,6 +39,12 @@ def test_main_reads_summary_input_and_writes_normalized_output(
             "overall_outcome": "COMPLETED",
             "overall_reason": None,
             "include_after_close": False,
+            "scan_settings": {
+                "scan_timing1": True,
+                "scan_timing2": True,
+                "timing2_30s_min_samples_per_bar": 2,
+                "timing2_max_sample_symbols_per_cycle": 30,
+            },
             "intraday_window": {
                 "reference_at": "2026-04-20T09:05:00+09:00",
                 "start_time": "09:04:00",
@@ -84,6 +90,33 @@ def test_main_reads_summary_input_and_writes_normalized_output(
                         "polling_exit_code": 0,
                         "polling_result": {
                             "stop_reason": "MAX_CYCLES_REACHED",
+                            "cycles": [
+                                {
+                                    "cycle_no": 1,
+                                    "timing2_price_sample_capture": {
+                                        "outcome": "COMPLETED",
+                                        "reason": None,
+                                        "summary": {
+                                            "candidate_count": 2,
+                                            "skipped_by_limit_count": 0,
+                                        },
+                                    },
+                                    "timing2_30s_bar_build": {
+                                        "outcome": "COMPLETED",
+                                        "reason": None,
+                                        "summary": {
+                                            "built_bar_count": 1,
+                                        },
+                                    },
+                                    "timing2_30s_trigger_scan": {
+                                        "outcome": "COMPLETED",
+                                        "reason": None,
+                                        "summary": {
+                                            "created_signal_count": 1,
+                                        },
+                                    },
+                                }
+                            ],
                         },
                     },
                 },
@@ -106,10 +139,21 @@ def test_main_reads_summary_input_and_writes_normalized_output(
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["overall_outcome"] == "COMPLETED"
+    assert payload["scan_settings"]["scan_timing2"] is True
     assert payload["steps"][0]["startup_outcome"] == "READY"
     assert payload["steps"][0]["universe_candidate_count"] == 12
     assert payload["steps"][1]["session_outcome"] == "COMPLETED"
     assert payload["steps"][1]["polling_stop_reason"] == "MAX_CYCLES_REACHED"
+    timing2_pipeline = payload["steps"][1]["timing2_30s_pipeline"]
+    assert timing2_pipeline["cycle_found"] is True
+    assert timing2_pipeline["all_steps_present"] is True
+    assert timing2_pipeline["all_steps_completed"] is True
+    assert (
+        timing2_pipeline["steps"]["timing2_price_sample_capture"]["summary"][
+            "candidate_count"
+        ]
+        == 2
+    )
 
 
 def test_main_reads_from_output_dir_and_returns_blocked(

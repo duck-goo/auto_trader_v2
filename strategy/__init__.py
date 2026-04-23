@@ -1,5 +1,13 @@
 """Strategy-layer exports."""
 
+from strategy.buy_strategy_selection import (
+    BUY_STRATEGY_CHOICES,
+    BUY_STRATEGY_BOTH,
+    BUY_STRATEGY_TIMING1,
+    BUY_STRATEGY_TIMING2,
+    resolve_buy_strategy_selection,
+    selection_to_buy_strategy,
+)
 from strategy.timing1_setup import (
     Timing1SetupEvaluator,
     Timing1SetupMatch,
@@ -58,6 +66,12 @@ from strategy.sell_macd_exit import (
 )
 
 __all__ = [
+    "BUY_STRATEGY_CHOICES",
+    "BUY_STRATEGY_BOTH",
+    "BUY_STRATEGY_TIMING1",
+    "BUY_STRATEGY_TIMING2",
+    "resolve_buy_strategy_selection",
+    "selection_to_buy_strategy",
     "Timing1SetupEvaluator",
     "Timing1ConvergenceEvaluator",
     "Timing1ConvergenceMatch",

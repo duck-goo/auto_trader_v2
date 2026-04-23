@@ -24,12 +24,22 @@ from services.sell_signal_execution_service import (
     SellSignalExecutionSettings,
 )
 from services.stale_buy_order_cancel_service import StaleBuyOrderCancelSettings
+from services.timing2_30s_bar_build_service import (
+    Timing2ThirtySecondBarBuildService,
+)
+from services.timing2_30s_trigger_service import (
+    Timing2ThirtySecondTriggerService,
+)
 from services.timing2_lot_exit_scan_service import Timing2LotExitScanService
+from services.timing2_price_sample_capture_service import (
+    Timing2PriceSampleCaptureService,
+)
 from strategy import (
     SellExitSettings,
     SellMacdExitSettings,
     Timing1IntradayTriggerSettings,
     Timing2LotExitSettings,
+    Timing2ThirtySecondTriggerSettings,
     Timing2IntradayTriggerSettings,
 )
 
@@ -48,10 +58,13 @@ class IntradayTradingCycleResult:
     record_scan_signals: bool
     maintenance: IntradayTradingCycleStepStatus
     intraday_bar_refresh: IntradayTradingCycleStepStatus
+    timing2_price_sample_capture: IntradayTradingCycleStepStatus
+    timing2_30s_bar_build: IntradayTradingCycleStepStatus
     sell_exit_scan: IntradayTradingCycleStepStatus
     sell_macd_scan: IntradayTradingCycleStepStatus
     timing2_lot_exit_scan: IntradayTradingCycleStepStatus
     sell_execution: IntradayTradingCycleStepStatus
+    timing2_30s_trigger_scan: IntradayTradingCycleStepStatus
     buy_trigger_scan: IntradayTradingCycleStepStatus
     buy_execution: IntradayTradingCycleStepStatus
 
@@ -64,19 +77,27 @@ class IntradayTradingCycleService:
         *,
         order_maintenance_service: OrderMaintenanceService,
         intraday_bar_refresh_service: IntradayBar15mRefreshService,
+        timing2_price_sample_capture_service: Timing2PriceSampleCaptureService,
+        timing2_30s_bar_build_service: Timing2ThirtySecondBarBuildService,
         sell_exit_scan_service: SellExitScanService,
         sell_macd_scan_service: SellMacdExitScanService,
         timing2_lot_exit_scan_service: Timing2LotExitScanService,
         sell_signal_execution_service: SellSignalExecutionService,
+        timing2_30s_trigger_service: Timing2ThirtySecondTriggerService,
         buy_trigger_scan_service: IntradayTriggerCombinedScanService,
         buy_signal_execution_service: BuySignalExecutionService,
     ) -> None:
         self._order_maintenance_service = order_maintenance_service
         self._intraday_bar_refresh_service = intraday_bar_refresh_service
+        self._timing2_price_sample_capture_service = (
+            timing2_price_sample_capture_service
+        )
+        self._timing2_30s_bar_build_service = timing2_30s_bar_build_service
         self._sell_exit_scan_service = sell_exit_scan_service
         self._sell_macd_scan_service = sell_macd_scan_service
         self._timing2_lot_exit_scan_service = timing2_lot_exit_scan_service
         self._sell_signal_execution_service = sell_signal_execution_service
+        self._timing2_30s_trigger_service = timing2_30s_trigger_service
         self._buy_trigger_scan_service = buy_trigger_scan_service
         self._buy_signal_execution_service = buy_signal_execution_service
 
@@ -97,6 +118,9 @@ class IntradayTradingCycleService:
         timing1_settings: Timing1IntradayTriggerSettings,
         timing1_daily_count: int,
         timing2_settings: Timing2IntradayTriggerSettings,
+        timing2_30s_trigger_settings: Timing2ThirtySecondTriggerSettings,
+        timing2_30s_min_samples_per_bar: int,
+        timing2_max_sample_symbols_per_cycle: int,
         buy_execution_settings: BuySignalExecutionSettings,
         buy_signal_limit: int,
         record_scan_signals: bool | None = None,
@@ -115,6 +139,21 @@ class IntradayTradingCycleService:
         intraday_bar_refresh_status = self._run_intraday_bar_refresh(
             trade_date=trade_date,
             write_bars=execute_actions,
+        )
+        timing2_price_sample_capture_status = (
+            self._run_timing2_price_sample_capture(
+                trade_date=trade_date,
+                run_timing2=run_timing2,
+                write_samples=execute_actions,
+                max_symbols=timing2_max_sample_symbols_per_cycle,
+            )
+        )
+        timing2_30s_bar_build_status = self._run_timing2_30s_bar_build(
+            trade_date=trade_date,
+            run_timing2=run_timing2,
+            min_samples_per_bar=timing2_30s_min_samples_per_bar,
+            write_bars=execute_actions,
+            price_sample_capture_status=timing2_price_sample_capture_status,
         )
         allow_signal_writes = (
             normalized_record_scan_signals
@@ -157,6 +196,13 @@ class IntradayTradingCycleService:
             timing2_settings=timing2_settings,
             write_signals=allow_signal_writes,
         )
+        timing2_30s_trigger_scan_status = self._run_timing2_30s_trigger_scan(
+            trade_date=trade_date,
+            run_timing2=run_timing2,
+            settings=timing2_30s_trigger_settings,
+            write_signals=allow_signal_writes,
+            bar_build_status=timing2_30s_bar_build_status,
+        )
         buy_execution_status = self._run_buy_execution(
             trade_date=trade_date,
             settings=buy_execution_settings,
@@ -167,6 +213,9 @@ class IntradayTradingCycleService:
             sell_macd_scan_status=sell_macd_scan_status,
             timing2_lot_exit_scan_status=timing2_lot_exit_scan_status,
             sell_execution_status=sell_execution_status,
+            timing2_price_sample_capture_status=timing2_price_sample_capture_status,
+            timing2_30s_bar_build_status=timing2_30s_bar_build_status,
+            timing2_30s_trigger_scan_status=timing2_30s_trigger_scan_status,
             buy_trigger_scan_status=buy_trigger_scan_status,
         )
 
@@ -176,10 +225,13 @@ class IntradayTradingCycleService:
             record_scan_signals=allow_signal_writes,
             maintenance=maintenance_status,
             intraday_bar_refresh=intraday_bar_refresh_status,
+            timing2_price_sample_capture=timing2_price_sample_capture_status,
+            timing2_30s_bar_build=timing2_30s_bar_build_status,
             sell_exit_scan=sell_exit_scan_status,
             sell_macd_scan=sell_macd_scan_status,
             timing2_lot_exit_scan=timing2_lot_exit_scan_status,
             sell_execution=sell_execution_status,
+            timing2_30s_trigger_scan=timing2_30s_trigger_scan_status,
             buy_trigger_scan=buy_trigger_scan_status,
             buy_execution=buy_execution_status,
         )
@@ -254,6 +306,77 @@ class IntradayTradingCycleService:
         if result.failed_count > 0:
             reason = (
                 "Some symbols failed 15-minute bar refresh. "
+                f"failed_count={result.failed_count}"
+            )
+        return IntradayTradingCycleStepStatus(
+            outcome="COMPLETED",
+            reason=reason,
+            result=result,
+        )
+
+    def _run_timing2_price_sample_capture(
+        self,
+        *,
+        trade_date: str,
+        run_timing2: bool,
+        write_samples: bool,
+        max_symbols: int,
+    ) -> IntradayTradingCycleStepStatus:
+        if not run_timing2:
+            return self._skipped("Timing2 30-second processing is disabled.")
+        try:
+            result = self._timing2_price_sample_capture_service.capture(
+                trade_date=trade_date,
+                write_samples=write_samples,
+                max_symbols=max_symbols,
+            )
+        except Exception as exc:
+            if "Timing2 setup signals are missing" in str(exc):
+                return self._skipped(f"{type(exc).__name__}: {exc}")
+            return self._failed(exc)
+
+        reason = None
+        if result.failed_count > 0:
+            reason = (
+                "Some Timing2 current-price samples failed. "
+                f"failed_count={result.failed_count}"
+            )
+        return IntradayTradingCycleStepStatus(
+            outcome="COMPLETED",
+            reason=reason,
+            result=result,
+        )
+
+    def _run_timing2_30s_bar_build(
+        self,
+        *,
+        trade_date: str,
+        run_timing2: bool,
+        min_samples_per_bar: int,
+        write_bars: bool,
+        price_sample_capture_status: IntradayTradingCycleStepStatus,
+    ) -> IntradayTradingCycleStepStatus:
+        if not run_timing2:
+            return self._skipped("Timing2 30-second processing is disabled.")
+        if price_sample_capture_status.outcome == "FAILED":
+            return self._skipped(
+                "Skipped because Timing2 current-price sample capture failed."
+            )
+        try:
+            result = self._timing2_30s_bar_build_service.build(
+                trade_date=trade_date,
+                min_samples_per_bar=min_samples_per_bar,
+                write_bars=write_bars,
+            )
+        except Exception as exc:
+            if "Timing2 setup signals are missing" in str(exc):
+                return self._skipped(f"{type(exc).__name__}: {exc}")
+            return self._failed(exc)
+
+        reason = None
+        if result.failed_count > 0:
+            reason = (
+                "Some Timing2 30-second bars failed to build. "
                 f"failed_count={result.failed_count}"
             )
         return IntradayTradingCycleStepStatus(
@@ -338,20 +461,47 @@ class IntradayTradingCycleService:
             result = self._buy_trigger_scan_service.scan(
                 trade_date=trade_date,
                 run_timing1=run_timing1,
-                run_timing2=run_timing2,
+                run_timing2=False,
                 timing1_settings=timing1_settings,
                 timing1_daily_count=timing1_daily_count,
                 write_timing1_signals=write_signals,
                 timing2_settings=timing2_settings,
-                write_timing2_signals=write_signals,
+                write_timing2_signals=False,
             )
         except Exception as exc:
             return self._failed(exc)
         return self._summarize_buy_trigger_scan(
             result=result,
             run_timing1=run_timing1,
-            run_timing2=run_timing2,
+            run_timing2=False,
         )
+
+    def _run_timing2_30s_trigger_scan(
+        self,
+        *,
+        trade_date: str,
+        run_timing2: bool,
+        settings: Timing2ThirtySecondTriggerSettings,
+        write_signals: bool,
+        bar_build_status: IntradayTradingCycleStepStatus,
+    ) -> IntradayTradingCycleStepStatus:
+        if not run_timing2:
+            return self._skipped("Timing2 30-second trigger scan is disabled.")
+        if bar_build_status.outcome == "FAILED":
+            return self._skipped(
+                "Skipped because Timing2 30-second bar build failed."
+            )
+        try:
+            result = self._timing2_30s_trigger_service.scan(
+                trade_date=trade_date,
+                settings=settings,
+                write_signals=write_signals,
+            )
+        except Exception as exc:
+            if "Timing2 setup signals are missing" in str(exc):
+                return self._skipped(f"{type(exc).__name__}: {exc}")
+            return self._failed(exc)
+        return self._completed(result)
 
     def _run_buy_execution(
         self,
@@ -365,6 +515,9 @@ class IntradayTradingCycleService:
         sell_macd_scan_status: IntradayTradingCycleStepStatus,
         timing2_lot_exit_scan_status: IntradayTradingCycleStepStatus,
         sell_execution_status: IntradayTradingCycleStepStatus,
+        timing2_price_sample_capture_status: IntradayTradingCycleStepStatus,
+        timing2_30s_bar_build_status: IntradayTradingCycleStepStatus,
+        timing2_30s_trigger_scan_status: IntradayTradingCycleStepStatus,
         buy_trigger_scan_status: IntradayTradingCycleStepStatus,
     ) -> IntradayTradingCycleStepStatus:
         if execute_actions and maintenance_status.outcome == "FAILED":
@@ -380,6 +533,21 @@ class IntradayTradingCycleService:
         if execute_actions and timing2_lot_exit_scan_status.outcome == "FAILED":
             return self._skipped(
                 "Skipped because Timing2 lot-level sell scan failed."
+            )
+        if (
+            execute_actions
+            and timing2_price_sample_capture_status.outcome == "FAILED"
+        ):
+            return self._skipped(
+                "Skipped because Timing2 current-price sample capture failed."
+            )
+        if execute_actions and timing2_30s_bar_build_status.outcome == "FAILED":
+            return self._skipped(
+                "Skipped because Timing2 30-second bar build failed."
+            )
+        if execute_actions and timing2_30s_trigger_scan_status.outcome == "FAILED":
+            return self._skipped(
+                "Skipped because Timing2 30-second trigger scan failed."
             )
         if execute_actions and sell_execution_status.outcome == "FAILED":
             return self._skipped(

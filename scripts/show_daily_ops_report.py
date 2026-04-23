@@ -59,6 +59,11 @@ CRITICAL_ATTENTION_FLAGS = {
 }
 
 DEFAULT_ALERT_ACTION_LIMIT = 3
+TIMING2_30S_STEP_NAMES = (
+    "timing2_price_sample_capture",
+    "timing2_30s_bar_build",
+    "timing2_30s_trigger_scan",
+)
 
 
 def _section(title: str) -> None:
@@ -209,6 +214,11 @@ def _summarize_trading_session(
         return summary
     preopen_result = payload.get("preopen_result")
     polling_result = payload.get("polling_result")
+    timing2_setup_readiness = _coerce_timing2_setup_readiness(
+        None
+        if not isinstance(polling_result, dict)
+        else polling_result.get("timing2_setup_readiness")
+    )
     summary.update(
         {
             "exists": True,
@@ -237,6 +247,13 @@ def _summarize_trading_session(
                 if not isinstance(polling_result, dict)
                 else polling_result.get("stop_reason")
             ),
+            "timing2_setup_readiness": timing2_setup_readiness,
+            "timing2_setup_required": timing2_setup_readiness.get("required"),
+            "timing2_setup_ready": timing2_setup_readiness.get("ready"),
+            "timing2_setup_signal_count": timing2_setup_readiness.get(
+                "setup_signal_count"
+            ),
+            "timing2_setup_reason": timing2_setup_readiness.get("reason"),
         }
     )
     return summary
@@ -471,6 +488,88 @@ def _summarize_kill_switch(
     return summary
 
 
+def _coerce_timing2_setup_readiness(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "trade_date": value.get("trade_date"),
+        "required": value.get("required"),
+        "setup_signal_count": value.get("setup_signal_count"),
+        "ready": value.get("ready"),
+        "reason": value.get("reason"),
+    }
+
+
+def _coerce_scan_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    scan_settings = payload.get("scan_settings")
+    if not isinstance(scan_settings, dict):
+        return {}
+    return {
+        "buy_strategy": scan_settings.get("buy_strategy"),
+        "effective_buy_strategy": scan_settings.get("effective_buy_strategy"),
+        "scan_timing1": scan_settings.get("scan_timing1"),
+        "scan_timing2": scan_settings.get("scan_timing2"),
+        "preopen_scan_timing2_setup": scan_settings.get(
+            "preopen_scan_timing2_setup"
+        ),
+        "preopen_write_timing2_signals": scan_settings.get(
+            "preopen_write_timing2_signals"
+        ),
+        "preopen_timing2_daily_count": scan_settings.get(
+            "preopen_timing2_daily_count"
+        ),
+        "preopen_timing2_new_high_lookback_days": scan_settings.get(
+            "preopen_timing2_new_high_lookback_days"
+        ),
+        "timing2_30s_min_samples_per_bar": scan_settings.get(
+            "timing2_30s_min_samples_per_bar"
+        ),
+        "timing2_max_sample_symbols_per_cycle": scan_settings.get(
+            "timing2_max_sample_symbols_per_cycle"
+        ),
+    }
+
+
+def _rehearsal_timing2_30s_verified(payload: dict[str, Any]) -> bool | None:
+    scan_settings = _coerce_scan_settings(payload)
+    if not _scan_settings_request_timing2_validation(scan_settings):
+        return None
+
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        return False
+
+    for step in steps:
+        if not isinstance(step, dict) or step.get("name") != "Trading Session Preview":
+            continue
+        if step.get("outcome") != "COMPLETED":
+            return False
+        result = step.get("result")
+        if not isinstance(result, dict):
+            return False
+        polling_result = result.get("polling_result")
+        if not isinstance(polling_result, dict):
+            return False
+        cycles = polling_result.get("cycles")
+        if not isinstance(cycles, list) or not cycles:
+            return False
+        first_cycle = cycles[0]
+        if not isinstance(first_cycle, dict):
+            return False
+        return all(
+            isinstance(first_cycle.get(step_name), dict)
+            for step_name in TIMING2_30S_STEP_NAMES
+        )
+    return False
+
+
+def _scan_settings_request_timing2_validation(scan_settings: dict[str, Any]) -> bool:
+    return (
+        scan_settings.get("scan_timing2") is True
+        or scan_settings.get("buy_strategy") in ("timing2", "both")
+    )
+
+
 def _scan_rehearsals(ops_dir: Path) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     if not ops_dir.exists():
@@ -482,6 +581,7 @@ def _scan_rehearsals(ops_dir: Path) -> list[dict[str, Any]]:
         payload = _load_optional_json(summary_path)
         if payload is None:
             continue
+        scan_settings = _coerce_scan_settings(payload)
         results.append(
             {
                 "name": child.name,
@@ -490,6 +590,10 @@ def _scan_rehearsals(ops_dir: Path) -> list[dict[str, Any]]:
                 "overall_outcome": payload.get("overall_outcome"),
                 "overall_reason": payload.get("overall_reason"),
                 "include_after_close": payload.get("include_after_close"),
+                "scan_settings": scan_settings,
+                "timing2_30s_verified": _rehearsal_timing2_30s_verified(
+                    payload
+                ),
             }
         )
     return results
@@ -537,6 +641,8 @@ def _collect_attention_flags(
             flags.append(f"{label.upper()}_BLOCKED")
         elif outcome not in ("COMPLETED",):
             flags.append(f"{label.upper()}_FAILED")
+        if row.get("timing2_setup_ready") is False:
+            flags.append(f"{label.upper()}_TIMING2_SETUP_NOT_READY")
 
     for label in ("after_close_preview", "after_close_write"):
         row = summaries[label]
@@ -580,6 +686,15 @@ def _collect_attention_flags(
             break
         if outcome.endswith("_BLOCKED"):
             flags.append("REHEARSAL_BLOCKED")
+            break
+        scan_settings = rehearsal.get("scan_settings")
+        if (
+            isinstance(scan_settings, dict)
+            and _scan_settings_request_timing2_validation(scan_settings)
+            and outcome == "COMPLETED"
+            and rehearsal.get("timing2_30s_verified") is not True
+        ):
+            flags.append("REHEARSAL_TIMING2_30S_NOT_VERIFIED")
             break
 
     unique_flags: list[str] = []
@@ -662,6 +777,11 @@ def _resolve_reference_path_for_flag(
                 return _optional_text(row.get("path"))
             if flag == "REHEARSAL_BLOCKED" and outcome.endswith("_BLOCKED"):
                 return _optional_text(row.get("path"))
+            if (
+                flag == "REHEARSAL_TIMING2_30S_NOT_VERIFIED"
+                and row.get("timing2_30s_verified") is False
+            ):
+                return _optional_text(row.get("path"))
         return None
 
     return None
@@ -692,6 +812,10 @@ def _build_attention_message(
             if "PREVIEW" in flag
             else summaries["trading_session_execute"]
         )
+        if flag.endswith("_TIMING2_SETUP_NOT_READY"):
+            return _optional_text(row.get("timing2_setup_reason")) or (
+                "Timing2 setup signals are missing for the trading session."
+            )
         return (
             _optional_text(row.get("session_reason"))
             or _optional_text(row.get("polling_stop_reason"))
@@ -755,6 +879,11 @@ def _build_attention_message(
                 return _optional_text(row.get("overall_reason")) or outcome
             if flag == "REHEARSAL_BLOCKED" and outcome.endswith("_BLOCKED"):
                 return _optional_text(row.get("overall_reason")) or outcome
+            if (
+                flag == "REHEARSAL_TIMING2_30S_NOT_VERIFIED"
+                and row.get("timing2_30s_verified") is False
+            ):
+                return "Timing2 was requested, but 30-second steps were not verified."
         return None
 
     return None
@@ -867,6 +996,27 @@ def _build_action_item_for_flag(
         )
 
     if flag in (
+        "TRADING_SESSION_PREVIEW_TIMING2_SETUP_NOT_READY",
+        "TRADING_SESSION_EXECUTE_TIMING2_SETUP_NOT_READY",
+    ):
+        return _build_action_item(
+            action_code="RERUN_TRADING_SESSION_WITH_TIMING2_SETUP",
+            severity=severity,
+            flag=flag,
+            summary="Timing2 setup signals are missing. Rerun the session with Timing2 preopen setup/write enabled before relying on Timing2 buys.",
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=(
+                f".\\venv\\Scripts\\python.exe scripts\\run_trading_session.py "
+                f"--trade-date {trade_date} --use-db-master "
+                f"--preopen-scan-timing2-setup --preopen-write-timing2-signals "
+                f"--buy-strategy timing2 --per-order-budget 1000000 "
+                f"--max-holdings 3 "
+                f"--output .\\data\\ops\\{trade_date}\\run_trading_session.preview.json"
+            ),
+        )
+
+    if flag in (
         "AFTER_CLOSE_PREVIEW_FAILED",
         "AFTER_CLOSE_WRITE_FAILED",
         "AFTER_CLOSE_PREVIEW_BLOCKED",
@@ -948,6 +1098,24 @@ def _build_action_item_for_flag(
             detail=message,
             reference_path=reference_path,
             suggested_command=None,
+        )
+
+    if flag == "REHEARSAL_TIMING2_30S_NOT_VERIFIED":
+        return _build_action_item(
+            action_code="RERUN_TIMING2_REHEARSAL",
+            severity=severity,
+            flag=flag,
+            summary="Rerun mock rehearsal with --scan-timing2 and confirm the 30-second pipeline appears in polling cycles.",
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=(
+                f".\\venv\\Scripts\\python.exe scripts\\run_mock_operational_rehearsal.py "
+                f"--trade-date {trade_date} --use-db-master "
+                f"--preopen-scan-timing2-setup --preopen-write-timing2-signals "
+                f"--buy-strategy timing2 "
+                f"--per-order-budget 1000000 --max-holdings 3 "
+                f"--output-dir .\\data\\ops\\{trade_date}\\rehearsal_timing2"
+            ),
         )
 
     return _build_action_item(

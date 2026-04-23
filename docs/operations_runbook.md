@@ -32,6 +32,28 @@
 ```
 
 - after-close preview 까지 같이 보고 싶으면 `--include-after-close` 를 추가한다.
+- Timing2 수정안까지 같이 검증하려면 아래 옵션을 추가한다.
+
+```powershell
+.\venv\Scripts\python.exe scripts\run_mock_operational_rehearsal.py `
+  --trade-date YYYY-MM-DD `
+  --use-db-master `
+  --per-order-budget 1000000 `
+  --max-holdings 3 `
+  --max-daily-order-count 7 `
+  --max-daily-loss 500000 `
+  --preopen-scan-timing2-setup `
+  --preopen-write-timing2-signals `
+  --buy-strategy timing2 `
+  --timing2-30s-min-samples-per-bar 2 `
+  --timing2-max-sample-symbols-per-cycle 30 `
+  --output-dir .\data\ops\YYYY-MM-DD\rehearsal_timing2
+```
+
+- 이 명령은 장전 Timing2 후보를 만들고 저장한 뒤, 장중 30초봉 파이프라인까지 1 cycle 로 확인한다.
+- 요약 결과에서 `timing2_30s_all_steps_present=True` 인지 확인한다.
+- 날짜 보고서에 `REHEARSAL_TIMING2_30S_NOT_VERIFIED` 가 나오면 Timing2 리허설이 충분히 검증되지 않은 상태다.
+- Timing1만 검증할 때는 Timing2 옵션 대신 `--buy-strategy timing1` 을 사용한다.
 - 리허설 결과를 짧게 다시 읽고 싶으면 아래 요약 명령을 사용한다.
 
 ```powershell
@@ -84,6 +106,8 @@ New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
 ### 3-3. 장중 세션 시작
 - 실제 운영은 `run_trading_session.py` 한 번으로 preopen + polling 을 같이 시작한다.
 - 먼저 preview로 같은 파라미터를 확인한다.
+- 아래 예시는 Timing2 수정안 기준이다. Timing1만 쓸 때는 Timing2 옵션을 빼고 `--buy-strategy timing1` 을 사용한다.
+- `--buy-strategy timing2` 또는 `both` 를 명시하면 `--preopen-scan-timing2-setup` 과 `--preopen-write-timing2-signals` 가 반드시 필요하다.
 
 ```powershell
 .\venv\Scripts\python.exe scripts\run_trading_session.py `
@@ -93,6 +117,11 @@ New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
   --max-holdings 3 `
   --max-daily-order-count 7 `
   --max-daily-loss 500000 `
+  --preopen-scan-timing2-setup `
+  --preopen-write-timing2-signals `
+  --buy-strategy timing2 `
+  --timing2-30s-min-samples-per-bar 2 `
+  --timing2-max-sample-symbols-per-cycle 30 `
   --output .\data\ops\YYYY-MM-DD\run_trading_session.preview.json
 ```
 
@@ -110,6 +139,11 @@ New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
   --max-holdings 3 `
   --max-daily-order-count 7 `
   --max-daily-loss 500000 `
+  --preopen-scan-timing2-setup `
+  --preopen-write-timing2-signals `
+  --buy-strategy timing2 `
+  --timing2-30s-min-samples-per-bar 2 `
+  --timing2-max-sample-symbols-per-cycle 30 `
   --execute `
   --output .\data\ops\YYYY-MM-DD\run_trading_session.execute.json
 ```
@@ -240,6 +274,9 @@ New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
 - `session_reason`
 - `preopen_result.readiness_outcome`
 - `polling_result.stop_reason`
+- Timing2 사용 시 `polling_result.cycles[].timing2_price_sample_capture`
+- Timing2 사용 시 `polling_result.cycles[].timing2_30s_bar_build`
+- Timing2 사용 시 `polling_result.cycles[].timing2_30s_trigger_scan`
 
 - `after_close.*.json`
 - `session_outcome`
