@@ -27,6 +27,7 @@ TIMING2_30S_STEP_NAMES = (
     "timing2_30s_bar_build",
     "timing2_30s_trigger_scan",
 )
+OK_STEP_OUTCOMES = frozenset({"READY", "COMPLETED"})
 
 
 def _section(title: str) -> None:
@@ -138,6 +139,21 @@ def _coerce_step_status(cycle: dict[str, Any], step_name: str) -> dict[str, Any]
     }
 
 
+def _coerce_timing2_setup_readiness(polling_result: Any) -> dict[str, Any]:
+    if not isinstance(polling_result, dict):
+        return {}
+    readiness = polling_result.get("timing2_setup_readiness")
+    if not isinstance(readiness, dict):
+        return {}
+    return {
+        "trade_date": readiness.get("trade_date"),
+        "required": readiness.get("required"),
+        "setup_signal_count": readiness.get("setup_signal_count"),
+        "ready": readiness.get("ready"),
+        "reason": readiness.get("reason"),
+    }
+
+
 def _build_timing2_30s_pipeline_summary(
     polling_result: Any,
 ) -> dict[str, Any]:
@@ -186,11 +202,131 @@ def _build_timing2_30s_pipeline_summary(
     }
 
 
+def _build_step_status_level(
+    outcome: Any,
+    warning_flags: list[str],
+) -> str:
+    outcome_text = _optional_text(outcome)
+    if outcome_text == "FAILED":
+        return "FAILED"
+    if outcome_text in OK_STEP_OUTCOMES and not warning_flags:
+        return "OK"
+    if outcome_text in OK_STEP_OUTCOMES:
+        return "WARNING"
+    if outcome_text is None and not warning_flags:
+        return "OK"
+    return "WARNING"
+
+
+def _build_startup_warning_flags(
+    startup_outcome: Any,
+    universe_exists: Any,
+    unresolved_order_count: Any,
+) -> list[str]:
+    warning_flags: list[str] = []
+    startup_outcome_text = _optional_text(startup_outcome)
+    if startup_outcome_text == "BLOCKED":
+        warning_flags.append("STARTUP_BLOCKED")
+    elif startup_outcome_text and startup_outcome_text not in OK_STEP_OUTCOMES:
+        warning_flags.append("STARTUP_NOT_READY")
+    if universe_exists is False:
+        warning_flags.append("UNIVERSE_MISSING")
+    if isinstance(unresolved_order_count, int) and unresolved_order_count > 0:
+        warning_flags.append("UNRESOLVED_ORDERS_PRESENT")
+    return warning_flags
+
+
+def _build_trading_warning_flags(
+    session_outcome: Any,
+    preopen_readiness_outcome: Any,
+    polling_stop_reason: Any,
+    timing2_setup_required: Any,
+    timing2_setup_ready: Any,
+    timing2_30s_pipeline: dict[str, Any],
+) -> list[str]:
+    warning_flags: list[str] = []
+    session_outcome_text = _optional_text(session_outcome)
+    if session_outcome_text and session_outcome_text not in OK_STEP_OUTCOMES:
+        warning_flags.append("TRADING_SESSION_NOT_COMPLETED")
+    preopen_outcome_text = _optional_text(preopen_readiness_outcome)
+    if preopen_outcome_text and preopen_outcome_text != "READY":
+        warning_flags.append("PREOPEN_NOT_READY")
+    if timing2_setup_required is True and timing2_setup_ready is not True:
+        warning_flags.append("TIMING2_SETUP_NOT_READY")
+    if (
+        isinstance(timing2_30s_pipeline, dict)
+        and timing2_30s_pipeline.get("cycle_found")
+        and not timing2_30s_pipeline.get("all_steps_completed")
+    ):
+        warning_flags.append("TIMING2_30S_PIPELINE_INCOMPLETE")
+
+    stop_reason_text = _optional_text(polling_stop_reason)
+    if stop_reason_text == "MAX_DAILY_LOSS_REACHED":
+        warning_flags.append("MAX_DAILY_LOSS_REACHED")
+    elif stop_reason_text == "MAX_CONSECUTIVE_FAILURES":
+        warning_flags.append("POLLING_FAILURE_THRESHOLD_REACHED")
+    elif stop_reason_text == "INTERRUPTED":
+        warning_flags.append("POLLING_INTERRUPTED")
+    elif stop_reason_text and stop_reason_text.startswith("FAILED:"):
+        warning_flags.append("POLLING_FAILED")
+
+    return warning_flags
+
+
+def _build_after_close_warning_flags(
+    session_outcome: Any,
+    step_rows: list[dict[str, Any]],
+) -> list[str]:
+    warning_flags: list[str] = []
+    session_outcome_text = _optional_text(session_outcome)
+    if session_outcome_text and session_outcome_text not in OK_STEP_OUTCOMES:
+        warning_flags.append("AFTER_CLOSE_NOT_COMPLETED")
+    if any(
+        _optional_text(row.get("outcome")) not in (None, "COMPLETED")
+        for row in step_rows
+        if isinstance(row, dict)
+    ):
+        warning_flags.append("AFTER_CLOSE_STEP_INCOMPLETE")
+    return warning_flags
+
+
+def _build_step_status_counts(steps: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "ok": 0,
+        "warning": 0,
+        "failed": 0,
+    }
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        status_level = _optional_text(step.get("status_level"))
+        if status_level == "FAILED":
+            counts["failed"] += 1
+        elif status_level == "WARNING":
+            counts["warning"] += 1
+        else:
+            counts["ok"] += 1
+    return counts
+
+
 def _build_startup_summary(step: dict[str, Any]) -> dict[str, Any]:
     result = _coerce_step_result(step) or {}
     unresolved_orders = result.get("unresolved_orders")
     live_positions = result.get("live_positions")
     universe_snapshot = result.get("universe_snapshot")
+    universe_exists = (
+        None
+        if not isinstance(universe_snapshot, dict)
+        else universe_snapshot.get("exists")
+    )
+    unresolved_order_count = (
+        None if not isinstance(unresolved_orders, list) else len(unresolved_orders)
+    )
+    warning_flags = _build_startup_warning_flags(
+        startup_outcome=result.get("outcome"),
+        universe_exists=universe_exists,
+        unresolved_order_count=unresolved_order_count,
+    )
     return {
         "name": step.get("name"),
         "exit_code": step.get("exit_code"),
@@ -200,21 +336,20 @@ def _build_startup_summary(step: dict[str, Any]) -> dict[str, Any]:
         "checked_at": result.get("checked_at"),
         "startup_outcome": result.get("outcome"),
         "startup_reason": result.get("reason"),
-        "universe_exists": (
-            None
-            if not isinstance(universe_snapshot, dict)
-            else universe_snapshot.get("exists")
-        ),
+        "universe_exists": universe_exists,
         "universe_candidate_count": (
             None
             if not isinstance(universe_snapshot, dict)
             else universe_snapshot.get("candidate_count")
         ),
-        "unresolved_order_count": (
-            None if not isinstance(unresolved_orders, list) else len(unresolved_orders)
-        ),
+        "unresolved_order_count": unresolved_order_count,
         "live_position_count": (
             None if not isinstance(live_positions, list) else len(live_positions)
+        ),
+        "warning_flags": warning_flags,
+        "status_level": _build_step_status_level(
+            step.get("outcome"),
+            warning_flags,
         ),
         "output_path": step.get("output_path"),
     }
@@ -224,6 +359,26 @@ def _build_trading_summary(step: dict[str, Any]) -> dict[str, Any]:
     result = _coerce_step_result(step) or {}
     preopen_result = result.get("preopen_result")
     polling_result = result.get("polling_result")
+    timing2_setup_readiness = _coerce_timing2_setup_readiness(polling_result)
+    timing2_30s_pipeline = _build_timing2_30s_pipeline_summary(
+        polling_result
+    )
+    warning_flags = _build_trading_warning_flags(
+        session_outcome=result.get("session_outcome"),
+        preopen_readiness_outcome=(
+            None
+            if not isinstance(preopen_result, dict)
+            else preopen_result.get("readiness_outcome")
+        ),
+        polling_stop_reason=(
+            None
+            if not isinstance(polling_result, dict)
+            else polling_result.get("stop_reason")
+        ),
+        timing2_setup_required=timing2_setup_readiness.get("required"),
+        timing2_setup_ready=timing2_setup_readiness.get("ready"),
+        timing2_30s_pipeline=timing2_30s_pipeline,
+    )
     return {
         "name": step.get("name"),
         "exit_code": step.get("exit_code"),
@@ -253,8 +408,18 @@ def _build_trading_summary(step: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(polling_result, dict)
             else polling_result.get("stop_reason")
         ),
-        "timing2_30s_pipeline": _build_timing2_30s_pipeline_summary(
-            polling_result
+        "timing2_setup_readiness": timing2_setup_readiness,
+        "timing2_setup_required": timing2_setup_readiness.get("required"),
+        "timing2_setup_ready": timing2_setup_readiness.get("ready"),
+        "timing2_setup_signal_count": timing2_setup_readiness.get(
+            "setup_signal_count"
+        ),
+        "timing2_setup_reason": timing2_setup_readiness.get("reason"),
+        "timing2_30s_pipeline": timing2_30s_pipeline,
+        "warning_flags": warning_flags,
+        "status_level": _build_step_status_level(
+            step.get("outcome"),
+            warning_flags,
         ),
         "output_path": step.get("output_path"),
     }
@@ -276,6 +441,10 @@ def _build_after_close_summary(step: dict[str, Any]) -> dict[str, Any]:
                     "exit_code": row.get("exit_code"),
                 }
             )
+    warning_flags = _build_after_close_warning_flags(
+        session_outcome=result.get("session_outcome"),
+        step_rows=step_rows,
+    )
     return {
         "name": step.get("name"),
         "exit_code": step.get("exit_code"),
@@ -288,6 +457,11 @@ def _build_after_close_summary(step: dict[str, Any]) -> dict[str, Any]:
         "lock_acquired": result.get("lock_acquired"),
         "lock_released": result.get("lock_released"),
         "steps": step_rows,
+        "warning_flags": warning_flags,
+        "status_level": _build_step_status_level(
+            step.get("outcome"),
+            warning_flags,
+        ),
         "output_path": step.get("output_path"),
     }
 
@@ -327,6 +501,7 @@ def _build_normalized_payload(summary_path: Path, payload: dict[str, Any]) -> di
         "include_after_close": payload.get("include_after_close"),
         "intraday_window": payload.get("intraday_window"),
         "scan_settings": payload.get("scan_settings"),
+        "step_status_counts": _build_step_status_counts(normalized_steps),
         "steps": normalized_steps,
     }
 
@@ -339,6 +514,9 @@ def _print_startup_summary(step: dict[str, Any]) -> None:
     _ok("universe_candidate_count", str(step.get("universe_candidate_count")))
     _ok("unresolved_order_count", str(step.get("unresolved_order_count")))
     _ok("live_position_count", str(step.get("live_position_count")))
+    warning_flags = step.get("warning_flags")
+    if isinstance(warning_flags, list) and warning_flags:
+        _warn("warning_flags", ", ".join(str(row) for row in warning_flags))
 
 
 def _print_trading_summary(step: dict[str, Any]) -> None:
@@ -349,6 +527,17 @@ def _print_trading_summary(step: dict[str, Any]) -> None:
     _ok("preopen_readiness_reason", "" if step.get("preopen_readiness_reason") is None else str(step.get("preopen_readiness_reason")))
     _ok("polling_started", str(step.get("polling_started")))
     _ok("polling_stop_reason", "" if step.get("polling_stop_reason") is None else str(step.get("polling_stop_reason")))
+    warning_flags = step.get("warning_flags")
+    if isinstance(warning_flags, list) and warning_flags:
+        _warn("warning_flags", ", ".join(str(row) for row in warning_flags))
+    if step.get("timing2_setup_required") is True:
+        _ok(
+            "timing2_setup_signal_count",
+            str(step.get("timing2_setup_signal_count")),
+        )
+        _ok("timing2_setup_ready", str(step.get("timing2_setup_ready")))
+        if step.get("timing2_setup_reason"):
+            _warn("timing2_setup_reason", str(step.get("timing2_setup_reason")))
     pipeline = step.get("timing2_30s_pipeline")
     if not isinstance(pipeline, dict) or not pipeline.get("cycle_found"):
         return
@@ -373,6 +562,9 @@ def _print_after_close_summary(step: dict[str, Any]) -> None:
     _ok("session_reason", "" if step.get("session_reason") is None else str(step.get("session_reason")))
     _ok("lock_acquired", str(step.get("lock_acquired")))
     _ok("lock_released", str(step.get("lock_released")))
+    warning_flags = step.get("warning_flags")
+    if isinstance(warning_flags, list) and warning_flags:
+        _warn("warning_flags", ", ".join(str(row) for row in warning_flags))
     step_rows = step.get("steps")
     if not isinstance(step_rows, list):
         return

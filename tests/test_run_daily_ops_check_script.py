@@ -371,3 +371,145 @@ def test_main_stops_when_report_payload_is_missing(
     payload = json.loads((ops_dir / "daily_ops_check.json").read_text(encoding="utf-8"))
     assert payload["overall_outcome"] == "REPORT_FAILED"
     assert payload["steps"][0]["outcome"] == "FAILED"
+
+
+def test_main_returns_notification_required_for_direct_buy_block_attention(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_daily_ops_check_buy_blocked"
+    )
+    _set_cli_args(monkeypatch, ops_dir=ops_dir)
+
+    commands: list[list[str]] = []
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "show_daily_ops_report.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "report_outcome": "ATTENTION",
+                    "health_outcome": "WARNING",
+                    "highest_severity": "WARNING",
+                    "artifact_count": 1,
+                    "attention_flags": ["EXECUTE_BUY_SIGNALS_PREVIEW_BLOCKED"],
+                    "action_items": [
+                        {"action_code": "REVIEW_BUY_EXECUTION_BLOCK"}
+                    ],
+                    "alert": {
+                        "title": f"[WARNING] Daily ops {TRADE_DATE}",
+                        "summary": "Direct buy execution is blocked by a risk guard.",
+                        "lines": [
+                            "WARNING: Buy execution direct run was blocked. Check MAX_DAILY_LOSS_REACHED before retrying.",
+                        ],
+                        "text": f"[WARNING] Daily ops {TRADE_DATE}\nDirect buy execution is blocked by a risk guard.",
+                    },
+                },
+            )
+            return 0
+        if script_name == "prepare_daily_ops_notification.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "health_outcome": "WARNING",
+                    "should_notify": True,
+                    "notification_reason": "health_outcome=WARNING meets min_level=WARNING",
+                    "top_action_codes": ["REVIEW_BUY_EXECUTION_BLOCK"],
+                },
+            )
+            return 4
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    assert [Path(command[1]).name for command in commands] == [
+        "show_daily_ops_report.py",
+        "prepare_daily_ops_notification.py",
+    ]
+    payload = json.loads((ops_dir / "daily_ops_check.json").read_text(encoding="utf-8"))
+    assert payload["overall_outcome"] == "NOTIFICATION_REQUIRED"
+    assert payload["overall_reason"] == (
+        "health_outcome=WARNING meets min_level=WARNING"
+    )
+    assert payload["steps"][1]["result"]["top_action_codes"] == [
+        "REVIEW_BUY_EXECUTION_BLOCK"
+    ]
+
+
+def test_main_returns_notification_required_for_direct_sell_failure_attention(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_daily_ops_check_sell_failed"
+    )
+    _set_cli_args(monkeypatch, ops_dir=ops_dir)
+
+    commands: list[list[str]] = []
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "show_daily_ops_report.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "report_outcome": "ATTENTION",
+                    "health_outcome": "CRITICAL",
+                    "highest_severity": "CRITICAL",
+                    "artifact_count": 1,
+                    "attention_flags": ["EXECUTE_SELL_SIGNALS_EXECUTE_FAILED"],
+                    "action_items": [
+                        {"action_code": "REVIEW_SELL_EXECUTION_FAILURE"}
+                    ],
+                    "alert": {
+                        "title": f"[CRITICAL] Daily ops {TRADE_DATE}",
+                        "summary": "Direct sell execution failed and needs manual review.",
+                        "lines": [
+                            "CRITICAL: Sell execution direct run failed. Check BROKER_SELL_FAILED before any retry.",
+                        ],
+                        "text": f"[CRITICAL] Daily ops {TRADE_DATE}\nDirect sell execution failed and needs manual review.",
+                    },
+                },
+            )
+            return 0
+        if script_name == "prepare_daily_ops_notification.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "health_outcome": "CRITICAL",
+                    "should_notify": True,
+                    "notification_reason": "health_outcome=CRITICAL meets min_level=WARNING",
+                    "top_action_codes": ["REVIEW_SELL_EXECUTION_FAILURE"],
+                },
+            )
+            return 4
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    assert [Path(command[1]).name for command in commands] == [
+        "show_daily_ops_report.py",
+        "prepare_daily_ops_notification.py",
+    ]
+    payload = json.loads((ops_dir / "daily_ops_check.json").read_text(encoding="utf-8"))
+    assert payload["overall_outcome"] == "NOTIFICATION_REQUIRED"
+    assert payload["overall_reason"] == (
+        "health_outcome=CRITICAL meets min_level=WARNING"
+    )
+    assert payload["steps"][1]["result"]["top_action_codes"] == [
+        "REVIEW_SELL_EXECUTION_FAILURE"
+    ]

@@ -183,3 +183,121 @@ def test_main_respects_min_level_ready(
     exit_code = target.main()
 
     assert exit_code == 4
+
+
+def test_main_returns_4_for_direct_buy_block_warning_report(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_notify_buy_blocked")
+    report_path = ops_dir / "daily_ops_report.json"
+    output_path = ops_dir / "daily_ops_notification.json"
+
+    _write_json(
+        report_path,
+        {
+            "trade_date": "2026-04-20",
+            "artifact_count": 1,
+            "report_outcome": "ATTENTION",
+            "health_outcome": "WARNING",
+            "highest_severity": "WARNING",
+            "attention_flags": [
+                "EXECUTE_BUY_SIGNALS_PREVIEW_BLOCKED",
+            ],
+            "action_items": [
+                {
+                    "action_code": "REVIEW_BUY_EXECUTION_BLOCK",
+                    "severity": "WARNING",
+                },
+            ],
+            "alert": {
+                "level": "WARNING",
+                "title": "[WARNING] Daily ops 2026-04-20",
+                "summary": "Direct buy execution is blocked by a risk guard.",
+                "lines": [
+                    "WARNING: Buy execution direct run was blocked. Check MAX_DAILY_LOSS_REACHED before retrying.",
+                ],
+                "text": "[WARNING] Daily ops 2026-04-20\nDirect buy execution is blocked by a risk guard.",
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(report_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["should_notify"] is True
+    assert payload["notification_reason"] == (
+        "health_outcome=WARNING meets min_level=WARNING"
+    )
+    assert payload["top_action_codes"] == ["REVIEW_BUY_EXECUTION_BLOCK"]
+    assert payload["summary"] == "Direct buy execution is blocked by a risk guard."
+
+
+def test_main_returns_4_for_direct_sell_failure_critical_report(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_notify_sell_failed")
+    report_path = ops_dir / "daily_ops_report.json"
+    output_path = ops_dir / "daily_ops_notification.json"
+
+    _write_json(
+        report_path,
+        {
+            "trade_date": "2026-04-20",
+            "artifact_count": 1,
+            "report_outcome": "ATTENTION",
+            "health_outcome": "CRITICAL",
+            "highest_severity": "CRITICAL",
+            "attention_flags": [
+                "EXECUTE_SELL_SIGNALS_EXECUTE_FAILED",
+            ],
+            "action_items": [
+                {
+                    "action_code": "REVIEW_SELL_EXECUTION_FAILURE",
+                    "severity": "CRITICAL",
+                },
+            ],
+            "alert": {
+                "level": "CRITICAL",
+                "title": "[CRITICAL] Daily ops 2026-04-20",
+                "summary": "Direct sell execution failed and needs manual review.",
+                "lines": [
+                    "CRITICAL: Sell execution direct run failed. Check BROKER_SELL_FAILED before any retry.",
+                ],
+                "text": "[CRITICAL] Daily ops 2026-04-20\nDirect sell execution failed and needs manual review.",
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(report_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["should_notify"] is True
+    assert payload["notification_reason"] == (
+        "health_outcome=CRITICAL meets min_level=WARNING"
+    )
+    assert payload["top_action_codes"] == ["REVIEW_SELL_EXECUTION_FAILURE"]
+    assert payload["summary"] == "Direct sell execution failed and needs manual review."

@@ -139,11 +139,20 @@ def test_main_reads_summary_input_and_writes_normalized_output(
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["overall_outcome"] == "COMPLETED"
+    assert payload["step_status_counts"] == {
+        "ok": 2,
+        "warning": 0,
+        "failed": 0,
+    }
     assert payload["scan_settings"]["scan_timing2"] is True
     assert payload["steps"][0]["startup_outcome"] == "READY"
     assert payload["steps"][0]["universe_candidate_count"] == 12
+    assert payload["steps"][0]["status_level"] == "OK"
+    assert payload["steps"][0]["warning_flags"] == []
     assert payload["steps"][1]["session_outcome"] == "COMPLETED"
     assert payload["steps"][1]["polling_stop_reason"] == "MAX_CYCLES_REACHED"
+    assert payload["steps"][1]["status_level"] == "OK"
+    assert payload["steps"][1]["warning_flags"] == []
     timing2_pipeline = payload["steps"][1]["timing2_30s_pipeline"]
     assert timing2_pipeline["cycle_found"] is True
     assert timing2_pipeline["all_steps_present"] is True
@@ -204,6 +213,17 @@ def test_main_reads_from_output_dir_and_returns_blocked(
     exit_code = target.main()
 
     assert exit_code == 4
+    normalized = target._build_normalized_payload(summary_path, target._load_json(summary_path))
+    assert normalized["step_status_counts"] == {
+        "ok": 0,
+        "warning": 1,
+        "failed": 0,
+    }
+    assert normalized["steps"][0]["status_level"] == "WARNING"
+    assert normalized["steps"][0]["warning_flags"] == [
+        "STARTUP_BLOCKED",
+        "UNRESOLVED_ORDERS_PRESENT",
+    ]
 
 
 def test_main_falls_back_to_child_output_when_step_result_is_missing(
@@ -279,5 +299,163 @@ def test_main_falls_back_to_child_output_when_step_result_is_missing(
     assert exit_code == 0
     payload = json.loads(normalized_path.read_text(encoding="utf-8"))
     assert payload["steps"][0]["session_outcome"] == "COMPLETED"
+    assert payload["steps"][0]["status_level"] == "OK"
+    assert payload["steps"][0]["warning_flags"] == []
     assert payload["steps"][0]["steps"][0]["name"] == "Refresh Intraday Bars 15m"
     assert payload["steps"][0]["steps"][1]["name"] == "Scan Sell MACD Exit Signals"
+
+
+def test_main_normalizes_timing2_setup_readiness(
+    test_db_path,
+    monkeypatch,
+):
+    summary_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_ops_summary_timing2_setup"
+    )
+    summary_path = summary_dir / "rehearsal_summary.json"
+    output_path = summary_dir / "normalized.json"
+
+    _write_json(
+        summary_path,
+        {
+            "trade_date": "2026-04-20",
+            "mode": "mock",
+            "started_at": "2026-04-20T09:05:00+09:00",
+            "finished_at": "2026-04-20T09:05:01+09:00",
+            "overall_outcome": "COMPLETED",
+            "overall_reason": None,
+            "include_after_close": False,
+            "intraday_window": {},
+            "steps": [
+                {
+                    "name": "Trading Session Preview",
+                    "exit_code": 0,
+                    "outcome": "COMPLETED",
+                    "reason": None,
+                    "output_path": str(summary_dir / "trading_session_preview.json"),
+                    "result": {
+                        "trade_date": "2026-04-20",
+                        "session_outcome": "COMPLETED",
+                        "session_reason": None,
+                        "preopen_exit_code": 0,
+                        "preopen_result": {
+                            "readiness_outcome": "READY",
+                            "readiness_reason": None,
+                        },
+                        "polling_started": True,
+                        "polling_exit_code": 0,
+                        "polling_result": {
+                            "stop_reason": "MAX_CYCLES_REACHED",
+                            "timing2_setup_readiness": {
+                                "trade_date": "2026-04-20",
+                                "required": True,
+                                "setup_signal_count": 0,
+                                "ready": False,
+                                "reason": "Timing2 setup signals are missing for this trade date.",
+                            },
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(summary_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    trading_step = payload["steps"][0]
+    assert payload["step_status_counts"] == {
+        "ok": 0,
+        "warning": 1,
+        "failed": 0,
+    }
+    assert trading_step["timing2_setup_required"] is True
+    assert trading_step["timing2_setup_ready"] is False
+    assert trading_step["timing2_setup_signal_count"] == 0
+    assert trading_step["status_level"] == "WARNING"
+    assert trading_step["warning_flags"] == ["TIMING2_SETUP_NOT_READY"]
+    assert "Timing2 setup signals are missing" in trading_step["timing2_setup_reason"]
+
+
+def test_main_marks_trading_warning_for_daily_loss_stop_reason(
+    test_db_path,
+    monkeypatch,
+):
+    summary_dir = test_db_path.with_name(f"{test_db_path.stem}_ops_summary_daily_loss")
+    summary_path = summary_dir / "rehearsal_summary.json"
+    output_path = summary_dir / "normalized.json"
+
+    _write_json(
+        summary_path,
+        {
+            "trade_date": "2026-04-20",
+            "mode": "mock",
+            "started_at": "2026-04-20T09:05:00+09:00",
+            "finished_at": "2026-04-20T09:05:01+09:00",
+            "overall_outcome": "TRADING_SESSION_BLOCKED",
+            "overall_reason": "Daily loss guard reached.",
+            "include_after_close": False,
+            "intraday_window": {},
+            "steps": [
+                {
+                    "name": "Trading Session Preview",
+                    "exit_code": 4,
+                    "outcome": "BLOCKED",
+                    "reason": "Daily loss guard reached.",
+                    "output_path": str(summary_dir / "trading_session_preview.json"),
+                    "result": {
+                        "trade_date": "2026-04-20",
+                        "session_outcome": "POLLING_BLOCKED",
+                        "session_reason": "MAX_DAILY_LOSS_REACHED",
+                        "preopen_exit_code": 0,
+                        "preopen_result": {
+                            "readiness_outcome": "READY",
+                            "readiness_reason": None,
+                        },
+                        "polling_started": True,
+                        "polling_exit_code": 4,
+                        "polling_result": {
+                            "stop_reason": "MAX_DAILY_LOSS_REACHED",
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(summary_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["step_status_counts"] == {
+        "ok": 0,
+        "warning": 1,
+        "failed": 0,
+    }
+    trading_step = payload["steps"][0]
+    assert trading_step["status_level"] == "WARNING"
+    assert trading_step["warning_flags"] == [
+        "TRADING_SESSION_NOT_COMPLETED",
+        "MAX_DAILY_LOSS_REACHED",
+    ]

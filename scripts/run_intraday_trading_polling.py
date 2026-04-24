@@ -27,6 +27,7 @@ from broker.kis import KisBroker
 from config.loader import load_settings
 from logger import setup_logging
 from services import (
+    BuySignalExecutionOutcome,
     BuySignalExecutionService,
     BuySignalExecutionSettings,
     ExecutionRecoveryFinalizeService,
@@ -82,6 +83,11 @@ from strategy import (
 )
 
 KST = pytz.timezone("Asia/Seoul")
+BUY_EXECUTION_TERMINAL_STOP_REASONS = frozenset(
+    {
+        "MAX_DAILY_LOSS_REACHED",
+    }
+)
 
 
 def _section(title: str) -> None:
@@ -571,6 +577,29 @@ def _cycle_failed(cycle_payload: dict[str, Any]) -> bool:
     )
 
 
+def _resolve_buy_execution_terminal_stop_reason(cycle_result: Any) -> str | None:
+    buy_execution_status = getattr(cycle_result, "buy_execution", None)
+    if buy_execution_status is None:
+        return None
+
+    buy_execution_result = getattr(buy_execution_status, "result", None)
+    if buy_execution_result is None:
+        return None
+
+    candidates = getattr(buy_execution_result, "candidates", None)
+    if not isinstance(candidates, tuple):
+        return None
+
+    for candidate in candidates:
+        if (
+            getattr(candidate, "outcome", None) == BuySignalExecutionOutcome.BLOCKED
+            and getattr(candidate, "reason_code", None)
+            in BUY_EXECUTION_TERMINAL_STOP_REASONS
+        ):
+            return str(candidate.reason_code)
+    return None
+
+
 def main() -> int:
     args = _parse_args()
 
@@ -950,6 +979,18 @@ def main() -> int:
                     lease_seconds=lock_lease_seconds,
                 )
 
+                terminal_stop_reason = _resolve_buy_execution_terminal_stop_reason(
+                    cycle_result
+                )
+                if terminal_stop_reason is not None:
+                    stop_reason = terminal_stop_reason
+                    _warn(
+                        "terminal_stop_reason",
+                        "Stopping polling because buy execution hit a terminal "
+                        f"risk guard: {terminal_stop_reason}",
+                    )
+                    break
+
                 if _cycle_failed(cycle_payload):
                     consecutive_failures += 1
                 else:
@@ -1033,6 +1074,8 @@ def main() -> int:
     if stop_reason == "INTERRUPTED":
         _warn("polling", "Interrupted by user.")
         return 130
+    if stop_reason in BUY_EXECUTION_TERMINAL_STOP_REASONS:
+        return 4
     if stop_reason.startswith("FAILED") or stop_reason == "MAX_CONSECUTIVE_FAILURES":
         return 5
     return 0

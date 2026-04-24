@@ -27,6 +27,7 @@ from broker.kis import KisBroker
 from config.loader import load_settings
 from logger import setup_logging
 from services import (
+    BuySignalExecutionOutcome,
     BuySignalExecutionService,
     BuySignalExecutionSettings,
     OrderService,
@@ -46,6 +47,11 @@ from storage.repositories import (
 )
 
 KST = pytz.timezone("Asia/Seoul")
+BUY_EXECUTION_TERMINAL_STOP_REASONS = frozenset(
+    {
+        "MAX_DAILY_LOSS_REACHED",
+    }
+)
 
 
 def _section(title: str) -> None:
@@ -176,6 +182,21 @@ def _resolve_lock_name(args: argparse.Namespace) -> str:
     return f"buy_signal_execution:{args.trade_date}"
 
 
+def _resolve_terminal_stop_reason(result: Any) -> str | None:
+    candidates = getattr(result, "candidates", None)
+    if not isinstance(candidates, tuple):
+        return None
+
+    for candidate in candidates:
+        if (
+            getattr(candidate, "outcome", None) == BuySignalExecutionOutcome.BLOCKED
+            and getattr(candidate, "reason_code", None)
+            in BUY_EXECUTION_TERMINAL_STOP_REASONS
+        ):
+            return candidate.reason_code
+    return None
+
+
 def _build_payload(
     *,
     trade_date: str,
@@ -183,6 +204,7 @@ def _build_payload(
     settings: BuySignalExecutionSettings,
     signal_limit: int,
     result=None,
+    stop_reason: str | None = None,
     lock_name: str | None = None,
     lock_owner_id: str | None = None,
     lock_acquired: bool = False,
@@ -202,6 +224,7 @@ def _build_payload(
             "cutoff_time": settings.cutoff_time,
         },
         "signal_limit": signal_limit,
+        "stop_reason": stop_reason,
         "lock_name": lock_name,
         "lock_owner_id": lock_owner_id,
         "lock_acquired": lock_acquired,
@@ -323,6 +346,7 @@ def main() -> int:
                     execute_mode=args.execute,
                     settings=execution_settings,
                     signal_limit=args.signal_limit,
+                    stop_reason=f"FAILED:{type(exc).__name__}",
                     lock_name=lock_name,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
@@ -353,6 +377,7 @@ def main() -> int:
                             execute_mode=True,
                             settings=execution_settings,
                             signal_limit=args.signal_limit,
+                            stop_reason="LOCK_BUSY",
                             lock_name=lock_name,
                             lock_owner_id=lock_owner_id,
                             lock_acquired=False,
@@ -422,6 +447,14 @@ def main() -> int:
         else:
             _warn("candidates", "No pending buy trigger signals found.")
 
+        stop_reason = _resolve_terminal_stop_reason(result)
+        if stop_reason is not None:
+            _warn(
+                "terminal_stop_reason",
+                "Buy execution hit a terminal risk guard: "
+                f"{stop_reason}",
+            )
+
         if output_path is not None:
             _save_json(
                 output_path,
@@ -431,6 +464,7 @@ def main() -> int:
                     settings=execution_settings,
                     signal_limit=args.signal_limit,
                     result=result,
+                    stop_reason=stop_reason,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,
@@ -439,6 +473,8 @@ def main() -> int:
             )
             _ok("json_saved", str(output_path))
 
+        if stop_reason in BUY_EXECUTION_TERMINAL_STOP_REASONS:
+            return 4
         return 0
 
     except Exception as exc:
@@ -454,6 +490,7 @@ def main() -> int:
                     execute_mode=args.execute,
                     settings=execution_settings,
                     signal_limit=args.signal_limit,
+                    stop_reason=f"FAILED:{type(exc).__name__}",
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,

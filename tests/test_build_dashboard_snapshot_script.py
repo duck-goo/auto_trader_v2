@@ -1,0 +1,277 @@
+"""Tests for build_dashboard_snapshot.py."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import scripts.build_dashboard_snapshot as target
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _set_cli_args(monkeypatch, args: list[str]) -> None:
+    monkeypatch.setattr(sys, "argv", ["build_dashboard_snapshot.py", *args])
+
+
+def test_main_builds_dashboard_snapshot_from_daily_report_and_latest_rehearsal(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_dashboard_snapshot")
+    output_path = ops_dir / "dashboard_snapshot.json"
+
+    _write_json(
+        ops_dir / "daily_ops_report.json",
+        {
+            "trade_date": "2026-04-20",
+            "artifact_count": 4,
+            "report_outcome": "ATTENTION",
+            "health_outcome": "CRITICAL",
+            "highest_severity": "CRITICAL",
+            "attention_flags": [
+                "KILL_SWITCH_ENABLED",
+                "TRADING_SESSION_EXECUTE_BLOCKED",
+                "EXECUTE_SELL_SIGNALS_EXECUTE_FAILED",
+            ],
+            "action_items": [
+                {"action_code": "REVIEW_KILL_SWITCH"},
+                {"action_code": "REVIEW_SELL_EXECUTION_FAILURE"},
+            ],
+            "alert": {
+                "critical_count": 2,
+                "warning_count": 1,
+            },
+            "latest_kill_switch": {
+                "enabled": True,
+                "note": "manual emergency stop",
+                "updated_at": "2026-04-20T11:10:00+09:00",
+            },
+            "artifacts": {
+                "trading_session_preview": {
+                    "exists": True,
+                    "status_level": "READY",
+                    "highest_severity": "NONE",
+                    "session_outcome": "COMPLETED",
+                    "session_reason": None,
+                    "preopen_readiness_outcome": "READY",
+                    "preopen_readiness_reason": None,
+                    "polling_started": True,
+                    "polling_exit_code": 0,
+                    "polling_stop_reason": "MAX_CYCLES_REACHED",
+                    "timing2_setup_required": True,
+                    "timing2_setup_ready": True,
+                    "timing2_setup_signal_count": 12,
+                    "attention_flags": [],
+                },
+                "trading_session_execute": {
+                    "exists": True,
+                    "status_level": "WARNING",
+                    "highest_severity": "WARNING",
+                    "session_outcome": "POLLING_BLOCKED",
+                    "session_reason": "MAX_DAILY_LOSS_REACHED",
+                    "preopen_readiness_outcome": "READY",
+                    "preopen_readiness_reason": None,
+                    "polling_started": True,
+                    "polling_exit_code": 4,
+                    "polling_stop_reason": "MAX_DAILY_LOSS_REACHED",
+                    "timing2_setup_required": True,
+                    "timing2_setup_ready": True,
+                    "timing2_setup_signal_count": 12,
+                    "attention_flags": [
+                        "TRADING_SESSION_EXECUTE_BLOCKED",
+                    ],
+                },
+                "execute_sell_signals_execute": {
+                    "exists": True,
+                    "status_level": "CRITICAL",
+                    "highest_severity": "CRITICAL",
+                    "stop_reason": "BROKER_SELL_FAILED",
+                    "blocked_count": 0,
+                    "preview_ready_count": 0,
+                    "submitted_count": 0,
+                    "acted_count": 1,
+                    "attention_flags": [
+                        "EXECUTE_SELL_SIGNALS_EXECUTE_FAILED",
+                    ],
+                },
+                "order_maintenance_preview": {
+                    "exists": True,
+                    "status_level": "WARNING",
+                    "highest_severity": "WARNING",
+                    "manual_recovery_required_count": 2,
+                    "attention_flags": [
+                        "MANUAL_RECOVERY_REQUIRED",
+                    ],
+                },
+            },
+        },
+    )
+
+    _write_json(
+        ops_dir / "rehearsal_old" / "rehearsal_summary.json",
+        {
+            "trade_date": "2026-04-20",
+            "mode": "mock",
+            "started_at": "2026-04-20T09:00:00+09:00",
+            "finished_at": "2026-04-20T09:00:10+09:00",
+            "overall_outcome": "TRADING_SESSION_FAILED",
+            "overall_reason": "Old failure.",
+            "include_after_close": False,
+            "intraday_window": {},
+            "steps": [],
+        },
+    )
+    _write_json(
+        ops_dir / "rehearsal_latest" / "rehearsal_summary.json",
+        {
+            "trade_date": "2026-04-20",
+            "mode": "mock",
+            "started_at": "2026-04-20T09:05:00+09:00",
+            "finished_at": "2026-04-20T09:05:12+09:00",
+            "overall_outcome": "COMPLETED",
+            "overall_reason": None,
+            "include_after_close": False,
+            "scan_settings": {
+                "scan_timing1": False,
+                "scan_timing2": True,
+                "timing2_30s_min_samples_per_bar": 2,
+                "timing2_max_sample_symbols_per_cycle": 30,
+            },
+            "intraday_window": {},
+            "steps": [
+                {
+                    "name": "Trading Session Preview",
+                    "exit_code": 0,
+                    "outcome": "COMPLETED",
+                    "reason": None,
+                    "result": {
+                        "trade_date": "2026-04-20",
+                        "session_outcome": "COMPLETED",
+                        "session_reason": None,
+                        "preopen_exit_code": 0,
+                        "preopen_result": {
+                            "readiness_outcome": "READY",
+                            "readiness_reason": None,
+                        },
+                        "polling_started": True,
+                        "polling_exit_code": 0,
+                        "polling_result": {
+                            "stop_reason": "MAX_CYCLES_REACHED",
+                            "timing2_setup_readiness": {
+                                "trade_date": "2026-04-20",
+                                "required": True,
+                                "setup_signal_count": 12,
+                                "ready": True,
+                                "reason": None,
+                            },
+                            "cycles": [
+                                {
+                                    "cycle_no": 1,
+                                    "timing2_price_sample_capture": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                    "timing2_30s_bar_build": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                    "timing2_30s_trigger_scan": {
+                                        "outcome": "COMPLETED",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--trade-date",
+            "2026-04-20",
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["overview"]["status_level"] == "CRITICAL"
+    assert payload["overview"]["top_action_codes"] == [
+        "REVIEW_KILL_SWITCH",
+        "REVIEW_SELL_EXECUTION_FAILURE",
+    ]
+    assert payload["controls"]["kill_switch_enabled"] is True
+    assert payload["controls"]["kill_switch_status_level"] == "CRITICAL"
+    assert payload["scan"]["live_preview"]["status_level"] == "READY"
+    assert payload["scan"]["live_execute"]["status_level"] == "WARNING"
+    assert payload["scan"]["live_execute"]["polling_stop_reason"] == (
+        "MAX_DAILY_LOSS_REACHED"
+    )
+    assert payload["executions"]["sell_execute"]["status_level"] == "CRITICAL"
+    assert payload["executions"]["sell_execute"]["stop_reason"] == (
+        "BROKER_SELL_FAILED"
+    )
+    assert (
+        payload["recovery"]["order_maintenance_preview"][
+            "manual_recovery_required_count"
+        ]
+        == 2
+    )
+    assert payload["rehearsal"]["available"] is True
+    assert payload["rehearsal"]["status_level"] == "READY"
+    assert payload["rehearsal"]["trading_session"]["timing2_setup_ready"] is True
+    assert payload["rehearsal"]["trading_session"]["timing2_30s_verified"] is True
+    assert payload["sources"]["rehearsal_summary_path"].endswith(
+        "rehearsal_latest\\rehearsal_summary.json"
+    )
+    assert payload["actions"]["required"] is True
+    assert payload["actions"]["top_action_codes"] == [
+        "REVIEW_KILL_SWITCH",
+        "REVIEW_SELL_EXECUTION_FAILURE",
+    ]
+
+
+def test_main_writes_no_data_snapshot_when_sources_are_missing(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_dashboard_snapshot_empty")
+    output_path = ops_dir / "dashboard_snapshot.json"
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--trade-date",
+            "2026-04-20",
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["overview"]["daily_report_available"] is False
+    assert payload["overview"]["status_level"] == "NO_DATA"
+    assert payload["controls"]["kill_switch_status_level"] == "MISSING"
+    assert payload["rehearsal"]["available"] is False
+    assert payload["scan"]["live_preview"]["available"] is False
+    assert payload["actions"]["required"] is False
+    assert payload["actions"]["count"] == 0

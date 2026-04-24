@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Auto Trader Dashboard Snapshot Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero panel">
+        <div class="hero-copy">
+          <p class="eyebrow">Auto Trader V2</p>
+          <h1>Dashboard Snapshot Viewer</h1>
+          <p class="hero-text">
+            실시간 운영 대시보드로 붙이기 전에, 현재 snapshot 계약을 바로 확인하는
+            검증용 화면입니다.
+          </p>
+        </div>
+        <div class="hero-status" id="hero-status-card"></div>
+      </header>
+
+      <section class="toolbar panel">
+        <div class="toolbar-copy">
+          <h2>Snapshot Input</h2>
+          <p>
+            기본 샘플이 먼저 열립니다. 실제 운영 데이터는
+            <code>data/ops/&lt;trade-date&gt;/dashboard_snapshot.json</code> 파일을
+            선택해서 확인하면 됩니다.
+          </p>
+        </div>
+        <div class="toolbar-actions">
+          <label class="file-button">
+            <input id="snapshot-file-input" type="file" accept=".json,application/json" />
+            <span>JSON 파일 열기</span>
+          </label>
+          <button id="load-sample-button" class="secondary-button" type="button">
+            샘플 다시 보기
+          </button>
+        </div>
+        <div class="toolbar-meta">
+          <div>
+            <span class="meta-label">현재 데이터</span>
+            <strong id="current-source-label">샘플 snapshot</strong>
+          </div>
+          <div>
+            <span class="meta-label">생성 시각</span>
+            <strong id="current-generated-at">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section id="error-banner" class="error-banner hidden" aria-live="polite"></section>
+
+      <main class="dashboard-grid">
+        <section class="panel dashboard-section" id="overview-section">
+          <div class="section-header">
+            <p class="eyebrow">Overview</p>
+            <h2>전체 운영 상태</h2>
+          </div>
+          <div class="metric-grid" id="overview-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="sources-section">
+          <div class="section-header">
+            <p class="eyebrow">Sources</p>
+            <h2>입력 소스</h2>
+          </div>
+          <div class="source-grid" id="sources-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="controls-section">
+          <div class="section-header">
+            <p class="eyebrow">Controls</p>
+            <h2>긴급 제어 상태</h2>
+          </div>
+          <div class="card-grid" id="controls-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="scan-section">
+          <div class="section-header">
+            <p class="eyebrow">Scan</p>
+            <h2>스캔 및 세션 상태</h2>
+          </div>
+          <div class="card-grid" id="scan-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="execution-section">
+          <div class="section-header">
+            <p class="eyebrow">Executions</p>
+            <h2>직접 실행 상태</h2>
+          </div>
+          <div class="card-grid" id="execution-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="recovery-section">
+          <div class="section-header">
+            <p class="eyebrow">Recovery</p>
+            <h2>복구 및 유지보수</h2>
+          </div>
+          <div class="card-grid" id="recovery-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="rehearsal-section">
+          <div class="section-header">
+            <p class="eyebrow">Rehearsal</p>
+            <h2>Mock 검증 상태</h2>
+          </div>
+          <div class="card-grid" id="rehearsal-grid"></div>
+        </section>
+
+        <section class="panel dashboard-section" id="actions-section">
+          <div class="section-header">
+            <p class="eyebrow">Actions</p>
+            <h2>즉시 확인 항목</h2>
+          </div>
+          <div id="actions-content"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

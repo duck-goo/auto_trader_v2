@@ -33,6 +33,10 @@ KNOWN_ARTIFACT_FILES = {
     "startup_check": "startup_check.json",
     "trading_session_preview": "run_trading_session.preview.json",
     "trading_session_execute": "run_trading_session.execute.json",
+    "execute_buy_signals_preview": "execute_buy_signals.preview.json",
+    "execute_buy_signals_execute": "execute_buy_signals.execute.json",
+    "execute_sell_signals_preview": "execute_sell_signals.preview.json",
+    "execute_sell_signals_execute": "execute_sell_signals.execute.json",
     "after_close_preview": "after_close.preview.json",
     "after_close_write": "after_close.write.json",
     "order_maintenance_preview": "order_maintenance.preview.json",
@@ -52,6 +56,8 @@ SEVERITY_CRITICAL = "CRITICAL"
 CRITICAL_ATTENTION_FLAGS = {
     "KILL_SWITCH_ENABLED",
     "TRADING_SESSION_EXECUTE_FAILED",
+    "EXECUTE_BUY_SIGNALS_EXECUTE_FAILED",
+    "EXECUTE_SELL_SIGNALS_EXECUTE_FAILED",
     "AFTER_CLOSE_WRITE_FAILED",
     "ORDER_MAINTENANCE_EXECUTE_FAILED",
     "EXECUTION_RECOVERY_IMPORT_EXECUTE_FAILED",
@@ -377,6 +383,88 @@ def _summarize_order_maintenance(
     return summary
 
 
+def _summarize_execute_buy_signals(
+    *,
+    label: str,
+    path: Path,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    summary = _artifact_stub(label=label, path=path)
+    if payload is None:
+        return summary
+    result = payload.get("result")
+    summary.update(
+        {
+            "exists": True,
+            "trade_date": payload.get("trade_date"),
+            "execute_mode": payload.get("execute_mode"),
+            "signal_limit": payload.get("signal_limit"),
+            "stop_reason": payload.get("stop_reason"),
+            "error_type": payload.get("error_type"),
+            "error_message": payload.get("error_message"),
+            "candidate_count": (
+                None if not isinstance(result, dict) else result.get("candidate_count")
+            ),
+            "preview_ready_count": (
+                None
+                if not isinstance(result, dict)
+                else result.get("preview_ready_count")
+            ),
+            "blocked_count": (
+                None if not isinstance(result, dict) else result.get("blocked_count")
+            ),
+            "submitted_count": (
+                None if not isinstance(result, dict) else result.get("submitted_count")
+            ),
+            "acted_count": (
+                None if not isinstance(result, dict) else result.get("acted_count")
+            ),
+        }
+    )
+    return summary
+
+
+def _summarize_execute_sell_signals(
+    *,
+    label: str,
+    path: Path,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    summary = _artifact_stub(label=label, path=path)
+    if payload is None:
+        return summary
+    result = payload.get("result")
+    summary.update(
+        {
+            "exists": True,
+            "trade_date": payload.get("trade_date"),
+            "execute_mode": payload.get("execute_mode"),
+            "signal_limit": payload.get("signal_limit"),
+            "stop_reason": payload.get("stop_reason"),
+            "error_type": payload.get("error_type"),
+            "error_message": payload.get("error_message"),
+            "candidate_count": (
+                None if not isinstance(result, dict) else result.get("candidate_count")
+            ),
+            "preview_ready_count": (
+                None
+                if not isinstance(result, dict)
+                else result.get("preview_ready_count")
+            ),
+            "blocked_count": (
+                None if not isinstance(result, dict) else result.get("blocked_count")
+            ),
+            "submitted_count": (
+                None if not isinstance(result, dict) else result.get("submitted_count")
+            ),
+            "acted_count": (
+                None if not isinstance(result, dict) else result.get("acted_count")
+            ),
+        }
+    )
+    return summary
+
+
 def _summarize_execution_recovery_review(
     *,
     path: Path,
@@ -644,6 +732,33 @@ def _collect_attention_flags(
         if row.get("timing2_setup_ready") is False:
             flags.append(f"{label.upper()}_TIMING2_SETUP_NOT_READY")
 
+    for label in ("execute_buy_signals_preview", "execute_buy_signals_execute"):
+        row = summaries[label]
+        if not row.get("exists"):
+            continue
+        stop_reason = _optional_text(row.get("stop_reason"))
+        error_type = _optional_text(row.get("error_type"))
+        if (
+            error_type is not None
+            or (stop_reason is not None and stop_reason.startswith("FAILED:"))
+        ):
+            flags.append(f"{label.upper()}_FAILED")
+        elif stop_reason is not None:
+            flags.append(f"{label.upper()}_BLOCKED")
+
+    for label in ("execute_sell_signals_preview", "execute_sell_signals_execute"):
+        row = summaries[label]
+        if not row.get("exists"):
+            continue
+        stop_reason = _optional_text(row.get("stop_reason"))
+        error_type = _optional_text(row.get("error_type"))
+        if error_type is not None or (
+            stop_reason is not None and stop_reason != "LOCK_BUSY"
+        ):
+            flags.append(f"{label.upper()}_FAILED")
+        elif stop_reason == "LOCK_BUSY":
+            flags.append(f"{label.upper()}_BLOCKED")
+
     for label in ("after_close_preview", "after_close_write"):
         row = summaries[label]
         if not row.get("exists"):
@@ -744,6 +859,22 @@ def _resolve_reference_path_for_flag(
         )
         return _optional_text(row.get("path"))
 
+    if flag.startswith("EXECUTE_BUY_SIGNALS_"):
+        row = (
+            summaries["execute_buy_signals_preview"]
+            if "PREVIEW" in flag
+            else summaries["execute_buy_signals_execute"]
+        )
+        return _optional_text(row.get("path"))
+
+    if flag.startswith("EXECUTE_SELL_SIGNALS_"):
+        row = (
+            summaries["execute_sell_signals_preview"]
+            if "PREVIEW" in flag
+            else summaries["execute_sell_signals_execute"]
+        )
+        return _optional_text(row.get("path"))
+
     if flag.startswith("AFTER_CLOSE_"):
         row = (
             summaries["after_close_preview"]
@@ -820,6 +951,32 @@ def _build_attention_message(
             _optional_text(row.get("session_reason"))
             or _optional_text(row.get("polling_stop_reason"))
             or _optional_text(row.get("session_outcome"))
+        )
+
+    if flag.startswith("EXECUTE_BUY_SIGNALS_"):
+        row = (
+            summaries["execute_buy_signals_preview"]
+            if "PREVIEW" in flag
+            else summaries["execute_buy_signals_execute"]
+        )
+        return (
+            _optional_text(row.get("stop_reason"))
+            or _optional_text(row.get("error_message"))
+            or _optional_text(row.get("error_type"))
+            or "Buy execution did not complete cleanly."
+        )
+
+    if flag.startswith("EXECUTE_SELL_SIGNALS_"):
+        row = (
+            summaries["execute_sell_signals_preview"]
+            if "PREVIEW" in flag
+            else summaries["execute_sell_signals_execute"]
+        )
+        return (
+            _optional_text(row.get("stop_reason"))
+            or _optional_text(row.get("error_message"))
+            or _optional_text(row.get("error_type"))
+            or "Sell execution did not complete cleanly."
         )
 
     if flag.startswith("AFTER_CLOSE_"):
@@ -1017,6 +1174,71 @@ def _build_action_item_for_flag(
         )
 
     if flag in (
+        "EXECUTE_BUY_SIGNALS_PREVIEW_BLOCKED",
+        "EXECUTE_BUY_SIGNALS_EXECUTE_BLOCKED",
+    ):
+        return _build_action_item(
+            action_code="REVIEW_BUY_EXECUTION_BLOCK",
+            severity=severity,
+            flag=flag,
+            summary="Buy execution direct run was blocked. Check the stop reason before retrying another buy pass.",
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=None,
+        )
+
+    if flag in (
+        "EXECUTE_BUY_SIGNALS_PREVIEW_FAILED",
+        "EXECUTE_BUY_SIGNALS_EXECUTE_FAILED",
+    ):
+        return _build_action_item(
+            action_code="REVIEW_BUY_EXECUTION_FAILURE",
+            severity=severity,
+            flag=flag,
+            summary="Buy execution direct run failed. Review the JSON error and rerun preview before using execute again.",
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=(
+                f".\\venv\\Scripts\\python.exe scripts\\execute_buy_signals.py "
+                f"--trade-date {trade_date} --per-order-budget 1000000 "
+                f"--max-holdings 3 "
+                f"--output .\\data\\ops\\{trade_date}\\execute_buy_signals.preview.json"
+            ),
+        )
+
+    if flag in (
+        "EXECUTE_SELL_SIGNALS_PREVIEW_BLOCKED",
+        "EXECUTE_SELL_SIGNALS_EXECUTE_BLOCKED",
+    ):
+        return _build_action_item(
+            action_code="REVIEW_SELL_EXECUTION_BLOCK",
+            severity=severity,
+            flag=flag,
+            summary="Sell execution direct run was blocked. Check the stop reason before retrying another sell pass.",
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=None,
+        )
+
+    if flag in (
+        "EXECUTE_SELL_SIGNALS_PREVIEW_FAILED",
+        "EXECUTE_SELL_SIGNALS_EXECUTE_FAILED",
+    ):
+        return _build_action_item(
+            action_code="REVIEW_SELL_EXECUTION_FAILURE",
+            severity=severity,
+            flag=flag,
+            summary="Sell execution direct run failed. Review the JSON error and rerun preview before using execute again.",
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=(
+                f".\\venv\\Scripts\\python.exe scripts\\execute_sell_signals.py "
+                f"--trade-date {trade_date} "
+                f"--output .\\data\\ops\\{trade_date}\\execute_sell_signals.preview.json"
+            ),
+        )
+
+    if flag in (
         "AFTER_CLOSE_PREVIEW_FAILED",
         "AFTER_CLOSE_WRITE_FAILED",
         "AFTER_CLOSE_PREVIEW_BLOCKED",
@@ -1191,6 +1413,180 @@ def _resolve_highest_severity(flag_details: list[dict[str, Any]]) -> str:
     return "NONE"
 
 
+def _resolve_summary_key_for_flag(
+    *,
+    flag: str,
+    summaries: dict[str, dict[str, Any]],
+) -> str | None:
+    if flag == "KILL_SWITCH_ENABLED":
+        latest_kill_switch = _latest_kill_switch_state(summaries)
+        return None if latest_kill_switch is None else _optional_text(
+            latest_kill_switch.get("label")
+        )
+
+    if flag == "STARTUP_NOT_READY":
+        return "startup_check"
+
+    if flag.startswith("TRADING_SESSION_"):
+        return (
+            "trading_session_preview"
+            if "PREVIEW" in flag
+            else "trading_session_execute"
+        )
+
+    if flag.startswith("EXECUTE_BUY_SIGNALS_"):
+        return (
+            "execute_buy_signals_preview"
+            if "PREVIEW" in flag
+            else "execute_buy_signals_execute"
+        )
+
+    if flag.startswith("EXECUTE_SELL_SIGNALS_"):
+        return (
+            "execute_sell_signals_preview"
+            if "PREVIEW" in flag
+            else "execute_sell_signals_execute"
+        )
+
+    if flag.startswith("AFTER_CLOSE_"):
+        return "after_close_preview" if "PREVIEW" in flag else "after_close_write"
+
+    if flag.startswith("ORDER_MAINTENANCE_"):
+        return (
+            "order_maintenance_preview"
+            if "PREVIEW" in flag
+            else "order_maintenance_execute"
+        )
+
+    if flag == "MANUAL_RECOVERY_REQUIRED":
+        for key in ("order_maintenance_execute", "order_maintenance_preview"):
+            row = summaries.get(key)
+            if isinstance(row, dict) and row.get("exists"):
+                return key
+        return None
+
+    if flag == "EXECUTION_RECOVERY_REVIEW_HAS_MANUAL_ITEMS":
+        return "execution_recovery_review"
+
+    if flag.startswith("EXECUTION_RECOVERY_IMPORT_"):
+        return (
+            "execution_recovery_import_preview"
+            if "PREVIEW" in flag
+            else "execution_recovery_import_execute"
+        )
+
+    return None
+
+
+def _rehearsal_matches_flag(flag: str, rehearsal: dict[str, Any]) -> bool:
+    outcome = _optional_text(rehearsal.get("overall_outcome")) or "UNKNOWN"
+    if flag == "REHEARSAL_FAILED":
+        return outcome.endswith("_FAILED")
+    if flag == "REHEARSAL_BLOCKED":
+        return outcome.endswith("_BLOCKED")
+    if flag == "REHEARSAL_TIMING2_30S_NOT_VERIFIED":
+        scan_settings = rehearsal.get("scan_settings")
+        return (
+            isinstance(scan_settings, dict)
+            and _scan_settings_request_timing2_validation(scan_settings)
+            and outcome == "COMPLETED"
+            and rehearsal.get("timing2_30s_verified") is False
+        )
+    return False
+
+
+def _resolve_row_status_level(
+    *,
+    exists: bool,
+    highest_severity: str,
+) -> str:
+    if not exists:
+        return "MISSING"
+    if highest_severity == SEVERITY_CRITICAL:
+        return "CRITICAL"
+    if highest_severity == SEVERITY_WARNING:
+        return "WARNING"
+    return "READY"
+
+
+def _annotate_summaries_with_status(
+    *,
+    summaries: dict[str, dict[str, Any]],
+    flag_details: list[dict[str, Any]],
+) -> None:
+    flags_by_summary: dict[str, list[dict[str, Any]]] = {}
+    for row in flag_details:
+        flag = _optional_text(row.get("flag"))
+        if flag is None:
+            continue
+        summary_key = _resolve_summary_key_for_flag(flag=flag, summaries=summaries)
+        if summary_key is None:
+            continue
+        flags_by_summary.setdefault(summary_key, []).append(row)
+
+    for key, summary in summaries.items():
+        row_flags = flags_by_summary.get(key, [])
+        highest_severity = _resolve_highest_severity(row_flags)
+        summary["attention_flags"] = [
+            str(row.get("flag"))
+            for row in row_flags
+            if _optional_text(row.get("flag")) is not None
+        ]
+        summary["highest_severity"] = highest_severity
+        summary["status_level"] = _resolve_row_status_level(
+            exists=bool(summary.get("exists")),
+            highest_severity=highest_severity,
+        )
+
+
+def _annotate_rehearsals_with_status(
+    *,
+    rehearsals: list[dict[str, Any]],
+    flag_details: list[dict[str, Any]],
+) -> None:
+    for rehearsal in rehearsals:
+        row_flags = [
+            row
+            for row in flag_details
+            if _rehearsal_matches_flag(
+                _optional_text(row.get("flag")) or "",
+                rehearsal,
+            )
+        ]
+        highest_severity = _resolve_highest_severity(row_flags)
+        rehearsal["attention_flags"] = [
+            str(row.get("flag"))
+            for row in row_flags
+            if _optional_text(row.get("flag")) is not None
+        ]
+        rehearsal["highest_severity"] = highest_severity
+        rehearsal["status_level"] = _resolve_row_status_level(
+            exists=True,
+            highest_severity=highest_severity,
+        )
+
+
+def _build_status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "ready": 0,
+        "warning": 0,
+        "critical": 0,
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("exists") is False:
+            continue
+        status_level = _optional_text(row.get("status_level")) or "READY"
+        if status_level == "CRITICAL":
+            counts["critical"] += 1
+        elif status_level == "WARNING":
+            counts["warning"] += 1
+        else:
+            counts["ready"] += 1
+    return counts
+
+
 def _severity_rank(severity: str | None) -> int:
     if severity == SEVERITY_CRITICAL:
         return 0
@@ -1283,12 +1679,16 @@ def _print_artifact_summary(row: dict[str, Any]) -> None:
     if not row.get("exists"):
         return
     for key in (
+        "status_level",
+        "highest_severity",
         "outcome",
         "reason",
         "session_outcome",
         "session_reason",
+        "stop_reason",
         "manual_recovery_required_count",
         "preview_ready_count",
+        "submitted_count",
         "imported_count",
         "blocked_count",
         "enabled",
@@ -1297,6 +1697,9 @@ def _print_artifact_summary(row: dict[str, Any]) -> None:
         if key in row:
             value = row.get(key)
             _ok(key, "" if value is None else str(value))
+    attention_flags = row.get("attention_flags")
+    if isinstance(attention_flags, list) and attention_flags:
+        _warn("attention_flags", ", ".join(str(flag) for flag in attention_flags))
 
 
 def main() -> int:
@@ -1335,6 +1738,26 @@ def main() -> int:
                 label="trading_session_execute",
                 path=ops_dir / KNOWN_ARTIFACT_FILES["trading_session_execute"],
                 payload=_load_optional_json(ops_dir / KNOWN_ARTIFACT_FILES["trading_session_execute"]),
+            ),
+            "execute_buy_signals_preview": _summarize_execute_buy_signals(
+                label="execute_buy_signals_preview",
+                path=ops_dir / KNOWN_ARTIFACT_FILES["execute_buy_signals_preview"],
+                payload=_load_optional_json(ops_dir / KNOWN_ARTIFACT_FILES["execute_buy_signals_preview"]),
+            ),
+            "execute_buy_signals_execute": _summarize_execute_buy_signals(
+                label="execute_buy_signals_execute",
+                path=ops_dir / KNOWN_ARTIFACT_FILES["execute_buy_signals_execute"],
+                payload=_load_optional_json(ops_dir / KNOWN_ARTIFACT_FILES["execute_buy_signals_execute"]),
+            ),
+            "execute_sell_signals_preview": _summarize_execute_sell_signals(
+                label="execute_sell_signals_preview",
+                path=ops_dir / KNOWN_ARTIFACT_FILES["execute_sell_signals_preview"],
+                payload=_load_optional_json(ops_dir / KNOWN_ARTIFACT_FILES["execute_sell_signals_preview"]),
+            ),
+            "execute_sell_signals_execute": _summarize_execute_sell_signals(
+                label="execute_sell_signals_execute",
+                path=ops_dir / KNOWN_ARTIFACT_FILES["execute_sell_signals_execute"],
+                payload=_load_optional_json(ops_dir / KNOWN_ARTIFACT_FILES["execute_sell_signals_execute"]),
             ),
             "after_close_preview": _summarize_after_close(
                 label="after_close_preview",
@@ -1405,6 +1828,14 @@ def main() -> int:
         summaries=summaries,
         rehearsals=rehearsals,
     )
+    _annotate_summaries_with_status(
+        summaries=summaries,
+        flag_details=flag_details,
+    )
+    _annotate_rehearsals_with_status(
+        rehearsals=rehearsals,
+        flag_details=flag_details,
+    )
     action_items = _build_action_items(
         trade_date=args.trade_date,
         flag_details=flag_details,
@@ -1437,6 +1868,8 @@ def main() -> int:
         "trade_date": args.trade_date,
         "ops_dir": str(ops_dir),
         "artifact_count": artifact_count,
+        "artifact_status_counts": _build_status_counts(list(summaries.values())),
+        "rehearsal_status_counts": _build_status_counts(rehearsals),
         "report_outcome": report_outcome,
         "health_outcome": health_outcome,
         "highest_severity": highest_severity,
@@ -1493,10 +1926,17 @@ def main() -> int:
         _section("rehearsals")
         for row in rehearsals:
             print(
-                f"{row['name']} outcome={row['overall_outcome']} "
+                f"{row['name']} status={row.get('status_level')} "
+                f"outcome={row['overall_outcome']} "
                 f"include_after_close={row['include_after_close']} "
                 f"reason={'' if row['overall_reason'] is None else row['overall_reason']}"
             )
+            attention_flags = row.get("attention_flags")
+            if isinstance(attention_flags, list) and attention_flags:
+                _warn(
+                    f"{row['name']}.attention_flags",
+                    ", ".join(str(flag) for flag in attention_flags),
+                )
 
     if output_path is not None:
         _save_json(output_path, payload)

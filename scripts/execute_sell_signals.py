@@ -30,6 +30,7 @@ from services import (
     OrderService,
     RuntimeLockBusyError,
     RuntimeLockService,
+    SellSignalExecutionOutcome,
     SellSignalExecutionService,
     SellSignalExecutionSettings,
     TradingRiskGuardService,
@@ -47,6 +48,11 @@ from storage.repositories import (
 )
 
 KST = pytz.timezone("Asia/Seoul")
+SELL_EXECUTION_FAILURE_OUTCOMES = (
+    SellSignalExecutionOutcome.FAILED,
+    SellSignalExecutionOutcome.REJECTED,
+    SellSignalExecutionOutcome.UNKNOWN,
+)
 
 
 def _section(title: str) -> None:
@@ -153,6 +159,29 @@ def _resolve_lock_name(args: argparse.Namespace) -> str:
     return f"sell_signal_execution:{args.trade_date}"
 
 
+def _resolve_result_stop_reason(result: Any) -> str | None:
+    candidates = getattr(result, "candidates", None)
+    if not isinstance(candidates, tuple):
+        return None
+
+    for outcome, fallback_reason in (
+        (SellSignalExecutionOutcome.FAILED, "SELL_EXECUTION_FAILED"),
+        (SellSignalExecutionOutcome.REJECTED, "SELL_ORDER_REJECTED"),
+        (SellSignalExecutionOutcome.UNKNOWN, "SELL_ORDER_RESULT_UNKNOWN"),
+    ):
+        for candidate in candidates:
+            if getattr(candidate, "outcome", None) != outcome:
+                continue
+            reason_code = getattr(candidate, "reason_code", None)
+            if isinstance(reason_code, str) and reason_code.strip():
+                return reason_code.strip()
+            order_error_code = getattr(candidate, "order_error_code", None)
+            if isinstance(order_error_code, str) and order_error_code.strip():
+                return order_error_code.strip()
+            return fallback_reason
+    return None
+
+
 def _build_payload(
     *,
     trade_date: str,
@@ -160,6 +189,7 @@ def _build_payload(
     settings: SellSignalExecutionSettings,
     signal_limit: int,
     result=None,
+    stop_reason: str | None = None,
     lock_name: str | None = None,
     lock_owner_id: str | None = None,
     lock_acquired: bool = False,
@@ -175,6 +205,7 @@ def _build_payload(
             "cutoff_time": settings.cutoff_time,
         },
         "signal_limit": signal_limit,
+        "stop_reason": stop_reason,
         "lock_name": lock_name,
         "lock_owner_id": lock_owner_id,
         "lock_acquired": lock_acquired,
@@ -283,6 +314,7 @@ def main() -> int:
                     execute_mode=args.execute,
                     settings=execution_settings,
                     signal_limit=args.signal_limit,
+                    stop_reason=f"FAILED:{type(exc).__name__}",
                     lock_name=lock_name,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
@@ -313,6 +345,7 @@ def main() -> int:
                             execute_mode=True,
                             settings=execution_settings,
                             signal_limit=args.signal_limit,
+                            stop_reason="LOCK_BUSY",
                             lock_name=lock_name,
                             lock_owner_id=lock_owner_id,
                             error_type=type(exc).__name__,
@@ -383,6 +416,14 @@ def main() -> int:
         else:
             _warn("candidates", "No pending sell trigger signals found.")
 
+        stop_reason = _resolve_result_stop_reason(result)
+        if stop_reason is not None:
+            _warn(
+                "stop_reason",
+                "Sell execution produced a non-clean result: "
+                f"{stop_reason}",
+            )
+
         if output_path is not None:
             _save_json(
                 output_path,
@@ -392,6 +433,7 @@ def main() -> int:
                     settings=execution_settings,
                     signal_limit=args.signal_limit,
                     result=result,
+                    stop_reason=stop_reason,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,
@@ -400,6 +442,8 @@ def main() -> int:
             )
             _ok("json_saved", str(output_path))
 
+        if stop_reason is not None:
+            return 5
         return 0
 
     except Exception as exc:
@@ -415,6 +459,7 @@ def main() -> int:
                     execute_mode=args.execute,
                     settings=execution_settings,
                     signal_limit=args.signal_limit,
+                    stop_reason=f"FAILED:{type(exc).__name__}",
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,

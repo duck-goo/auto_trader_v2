@@ -145,6 +145,16 @@ def test_main_builds_ready_report_with_known_artifacts(
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["artifact_count"] == 5
+    assert payload["artifact_status_counts"] == {
+        "ready": 4,
+        "warning": 0,
+        "critical": 0,
+    }
+    assert payload["rehearsal_status_counts"] == {
+        "ready": 1,
+        "warning": 0,
+        "critical": 0,
+    }
     assert payload["report_outcome"] == "READY"
     assert payload["health_outcome"] == "READY"
     assert payload["highest_severity"] == "NONE"
@@ -157,11 +167,16 @@ def test_main_builds_ready_report_with_known_artifacts(
     assert "[READY] Daily ops 2026-04-20" in alert_text
     assert "No attention flags detected." in alert_text
     assert payload["artifacts"]["startup_check"]["outcome"] == "READY"
+    assert payload["artifacts"]["startup_check"]["status_level"] == "READY"
+    assert payload["artifacts"]["startup_check"]["attention_flags"] == []
     assert payload["artifacts"]["trading_session_preview"]["polling_stop_reason"] == "MAX_CYCLES_REACHED"
+    assert payload["artifacts"]["trading_session_preview"]["status_level"] == "READY"
     assert payload["latest_kill_switch"]["enabled"] is False
     assert payload["rehearsals"][0]["overall_outcome"] == "COMPLETED"
     assert payload["rehearsals"][0]["scan_settings"]["scan_timing2"] is True
     assert payload["rehearsals"][0]["timing2_30s_verified"] is True
+    assert payload["rehearsals"][0]["status_level"] == "READY"
+    assert payload["rehearsals"][0]["attention_flags"] == []
 
 
 def test_main_marks_attention_when_blocked_or_manual_actions_exist(
@@ -254,6 +269,16 @@ def test_main_marks_attention_when_blocked_or_manual_actions_exist(
 
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["artifact_status_counts"] == {
+        "ready": 0,
+        "warning": 2,
+        "critical": 1,
+    }
+    assert payload["rehearsal_status_counts"] == {
+        "ready": 0,
+        "warning": 1,
+        "critical": 0,
+    }
     assert payload["report_outcome"] == "ATTENTION"
     assert payload["health_outcome"] == "CRITICAL"
     assert payload["highest_severity"] == "CRITICAL"
@@ -285,6 +310,14 @@ def test_main_marks_attention_when_blocked_or_manual_actions_exist(
     assert "Kill switch is enabled. note=manual emergency stop" in alert_text
     assert payload["latest_kill_switch"]["enabled"] is True
     assert payload["artifacts"]["order_maintenance_preview"]["manual_recovery_required_count"] == 2
+    assert payload["artifacts"]["kill_switch_enable"]["status_level"] == "CRITICAL"
+    assert payload["artifacts"]["kill_switch_enable"]["attention_flags"] == [
+        "KILL_SWITCH_ENABLED"
+    ]
+    assert payload["artifacts"]["order_maintenance_preview"]["status_level"] == "WARNING"
+    assert "MANUAL_RECOVERY_REQUIRED" in payload["artifacts"]["order_maintenance_preview"]["attention_flags"]
+    assert payload["rehearsals"][0]["status_level"] == "WARNING"
+    assert payload["rehearsals"][0]["attention_flags"] == ["REHEARSAL_BLOCKED"]
 
 
 def test_main_strict_returns_4_for_warning_only(
@@ -401,12 +434,21 @@ def test_main_warns_when_timing2_rehearsal_did_not_verify_30s_pipeline(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["health_outcome"] == "WARNING"
     assert "REHEARSAL_TIMING2_30S_NOT_VERIFIED" in payload["attention_flags"]
+    assert payload["rehearsal_status_counts"] == {
+        "ready": 0,
+        "warning": 1,
+        "critical": 0,
+    }
     action_items = {row["flag"]: row for row in payload["action_items"]}
     assert (
         action_items["REHEARSAL_TIMING2_30S_NOT_VERIFIED"]["action_code"]
         == "RERUN_TIMING2_REHEARSAL"
     )
     assert payload["rehearsals"][0]["timing2_30s_verified"] is False
+    assert payload["rehearsals"][0]["status_level"] == "WARNING"
+    assert payload["rehearsals"][0]["attention_flags"] == [
+        "REHEARSAL_TIMING2_30S_NOT_VERIFIED"
+    ]
 
 
 def test_main_warns_when_trading_session_timing2_setup_is_not_ready(
@@ -461,6 +503,8 @@ def test_main_warns_when_trading_session_timing2_setup_is_not_ready(
     assert payload["health_outcome"] == "WARNING"
     assert flag in payload["attention_flags"]
     assert payload["artifacts"]["trading_session_preview"]["timing2_setup_ready"] is False
+    assert payload["artifacts"]["trading_session_preview"]["status_level"] == "WARNING"
+    assert payload["artifacts"]["trading_session_preview"]["attention_flags"] == [flag]
     assert (
         payload["artifacts"]["trading_session_preview"]["timing2_setup_signal_count"]
         == 0
@@ -472,6 +516,125 @@ def test_main_warns_when_trading_session_timing2_setup_is_not_ready(
     )
     assert "--preopen-scan-timing2-setup" in action_items[flag]["suggested_command"]
     assert "--preopen-write-timing2-signals" in action_items[flag]["suggested_command"]
+
+
+def test_main_warns_when_direct_buy_execution_hits_daily_loss_stop_reason(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_daily_ops_buy_blocked")
+    output_path = ops_dir / "daily_ops_report.json"
+
+    _write_json(
+        ops_dir / "execute_buy_signals.preview.json",
+        {
+            "trade_date": "2026-04-20",
+            "execute_mode": False,
+            "signal_limit": 200,
+            "stop_reason": "MAX_DAILY_LOSS_REACHED",
+            "error_type": None,
+            "error_message": None,
+            "result": {
+                "candidate_count": 1,
+                "preview_ready_count": 0,
+                "blocked_count": 1,
+                "submitted_count": 0,
+                "acted_count": 0,
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    flag = "EXECUTE_BUY_SIGNALS_PREVIEW_BLOCKED"
+    assert payload["health_outcome"] == "WARNING"
+    assert flag in payload["attention_flags"]
+    assert payload["artifacts"]["execute_buy_signals_preview"]["stop_reason"] == (
+        "MAX_DAILY_LOSS_REACHED"
+    )
+    assert payload["artifacts"]["execute_buy_signals_preview"]["blocked_count"] == 1
+    action_items = {row["flag"]: row for row in payload["action_items"]}
+    assert action_items[flag]["action_code"] == "REVIEW_BUY_EXECUTION_BLOCK"
+    assert action_items[flag]["reference_path"].endswith(
+        "execute_buy_signals.preview.json"
+    )
+
+
+def test_main_marks_direct_sell_execution_failure_as_critical(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_daily_ops_sell_failed")
+    output_path = ops_dir / "daily_ops_report.json"
+
+    _write_json(
+        ops_dir / "execute_sell_signals.execute.json",
+        {
+            "trade_date": "2026-04-20",
+            "execute_mode": True,
+            "signal_limit": 200,
+            "stop_reason": "BROKER_SELL_FAILED",
+            "error_type": None,
+            "error_message": None,
+            "result": {
+                "candidate_count": 1,
+                "preview_ready_count": 0,
+                "blocked_count": 0,
+                "submitted_count": 0,
+                "acted_count": 1,
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    flag = "EXECUTE_SELL_SIGNALS_EXECUTE_FAILED"
+    assert payload["health_outcome"] == "CRITICAL"
+    assert payload["highest_severity"] == "CRITICAL"
+    assert flag in payload["attention_flags"]
+    assert payload["artifact_status_counts"] == {
+        "ready": 0,
+        "warning": 0,
+        "critical": 1,
+    }
+    assert payload["artifacts"]["execute_sell_signals_execute"]["stop_reason"] == (
+        "BROKER_SELL_FAILED"
+    )
+    assert payload["artifacts"]["execute_sell_signals_execute"]["status_level"] == (
+        "CRITICAL"
+    )
+    assert payload["artifacts"]["execute_sell_signals_execute"]["attention_flags"] == [
+        flag
+    ]
+    action_items = {row["flag"]: row for row in payload["action_items"]}
+    assert action_items[flag]["action_code"] == "REVIEW_SELL_EXECUTION_FAILURE"
+    assert action_items[flag]["reference_path"].endswith(
+        "execute_sell_signals.execute.json"
+    )
 
 
 def test_main_strict_returns_5_for_critical_attention(

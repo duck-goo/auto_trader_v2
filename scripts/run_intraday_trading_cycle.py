@@ -27,6 +27,7 @@ from broker.kis import KisBroker
 from config.loader import load_settings
 from logger import setup_logging
 from services import (
+    BuySignalExecutionOutcome,
     BuySignalExecutionService,
     BuySignalExecutionSettings,
     ExecutionRecoveryFinalizeService,
@@ -82,6 +83,11 @@ from strategy import (
 )
 
 KST = pytz.timezone("Asia/Seoul")
+BUY_EXECUTION_TERMINAL_STOP_REASONS = frozenset(
+    {
+        "MAX_DAILY_LOSS_REACHED",
+    }
+)
 
 
 def _section(title: str) -> None:
@@ -567,6 +573,29 @@ def _print_timing2_setup_readiness(
         _warn("timing2_setup_readiness", readiness.reason)
 
 
+def _resolve_buy_execution_terminal_stop_reason(result: Any) -> str | None:
+    buy_execution_status = getattr(result, "buy_execution", None)
+    if buy_execution_status is None:
+        return None
+
+    buy_execution_result = getattr(buy_execution_status, "result", None)
+    if buy_execution_result is None:
+        return None
+
+    candidates = getattr(buy_execution_result, "candidates", None)
+    if not isinstance(candidates, tuple):
+        return None
+
+    for candidate in candidates:
+        if (
+            getattr(candidate, "outcome", None) == BuySignalExecutionOutcome.BLOCKED
+            and getattr(candidate, "reason_code", None)
+            in BUY_EXECUTION_TERMINAL_STOP_REASONS
+        ):
+            return str(candidate.reason_code)
+    return None
+
+
 def _build_payload(
     *,
     trade_date: str,
@@ -589,6 +618,7 @@ def _build_payload(
     buy_signal_limit: int,
     sell_signal_limit: int,
     result=None,
+    stop_reason: str | None = None,
     timing2_setup_readiness: Timing2SetupSignalReadiness | None = None,
     lock_name: str | None = None,
     lock_owner_id: str | None = None,
@@ -600,6 +630,7 @@ def _build_payload(
     payload = {
         "trade_date": trade_date,
         "execute_mode": execute_mode,
+        "stop_reason": stop_reason,
         "settings": {
             "timeout_seconds": timeout_seconds,
             "buy_strategy": selection_to_buy_strategy(
@@ -937,6 +968,7 @@ def main() -> int:
                     ),
                     buy_signal_limit=args.buy_signal_limit,
                     sell_signal_limit=args.sell_signal_limit,
+                    stop_reason=f"FAILED:{type(exc).__name__}",
                     lock_name=lock_name,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
@@ -988,6 +1020,7 @@ def main() -> int:
                             ),
                             buy_signal_limit=args.buy_signal_limit,
                             sell_signal_limit=args.sell_signal_limit,
+                            stop_reason="LOCK_BUSY",
                             timing2_setup_readiness=timing2_setup_readiness,
                             lock_name=lock_name,
                             lock_owner_id=lock_owner_id,
@@ -1174,6 +1207,13 @@ def main() -> int:
         )
         _print_step("Buy Trigger Scan", result.buy_trigger_scan, _serialize_buy_trigger_summary)
         _print_step("Buy Execution", result.buy_execution, _serialize_buy_execution_summary)
+        stop_reason = _resolve_buy_execution_terminal_stop_reason(result)
+        if stop_reason is not None:
+            _warn(
+                "terminal_stop_reason",
+                "Single cycle hit a terminal buy-side risk guard: "
+                f"{stop_reason}",
+            )
 
         if output_path is not None:
             if lock_acquired and lock_service is not None and lock_name is not None:
@@ -1206,6 +1246,7 @@ def main() -> int:
                     buy_signal_limit=args.buy_signal_limit,
                     sell_signal_limit=args.sell_signal_limit,
                     result=result,
+                    stop_reason=stop_reason,
                     timing2_setup_readiness=timing2_setup_readiness,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
@@ -1215,6 +1256,8 @@ def main() -> int:
             )
             _ok("json_saved", str(output_path))
 
+        if stop_reason in BUY_EXECUTION_TERMINAL_STOP_REASONS:
+            return 4
         if _has_failed_step(result):
             return 5
         return 0
@@ -1251,6 +1294,7 @@ def main() -> int:
                     ),
                     buy_signal_limit=args.buy_signal_limit,
                     sell_signal_limit=args.sell_signal_limit,
+                    stop_reason=f"FAILED:{type(exc).__name__}",
                     timing2_setup_readiness=timing2_setup_readiness,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
