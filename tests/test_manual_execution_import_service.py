@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from storage.db import get_connection, transaction
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
@@ -199,6 +201,98 @@ def test_execute_import_inserts_execution_and_updates_order_and_position(test_db
         assert lots[0].total_buy_qty == 2
         assert lots[0].remaining_qty == 2
         assert lots[0].avg_buy_price == 70_500
+    finally:
+        conn.close()
+
+
+def test_execute_import_blocks_timing2_buy_without_entry_lot_repository(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        order_repo = OrderRepository(conn)
+        execution_repo = ExecutionRepository(conn)
+        position_repo = PositionRepository(conn)
+        _seed_submitted_order(
+            conn,
+            order_repo,
+            client_order_id="COID_TIMING2_NO_LOT_REPO",
+            strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+        )
+
+        service = ManualExecutionImportService(
+            conn=conn,
+            order_repo=order_repo,
+            execution_repo=execution_repo,
+            position_repo=position_repo,
+            entry_lot_repo=None,
+        )
+
+        result = service.import_items(
+            items=[
+                ManualExecutionImportItem(
+                    client_order_id="COID_TIMING2_NO_LOT_REPO",
+                    kis_exec_no="EXEC-T2-NO-LOT",
+                    qty=2,
+                    price=70_500,
+                    executed_at="2026-04-17T09:05:00+09:00",
+                )
+            ],
+            execute_import=True,
+        )
+
+        assert result.blocked_count == 1
+        assert result.candidates[0].reason_code == "ENTRY_LOT_REPOSITORY_MISSING"
+
+        order_row = order_repo.get_by_client_order_id("COID_TIMING2_NO_LOT_REPO")
+        assert order_row.status == DbOrderStatus.SUBMITTED
+        assert order_row.filled_qty == 0
+        assert execution_repo.list_by_order(order_row.id) == []
+        assert position_repo.get("005930") is None
+    finally:
+        conn.close()
+
+
+def test_import_rejects_zero_actual_execution_price(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        order_repo = OrderRepository(conn)
+        execution_repo = ExecutionRepository(conn)
+        position_repo = PositionRepository(conn)
+        _seed_submitted_order(
+            conn,
+            order_repo,
+            client_order_id="COID_ZERO_EXEC_PRICE",
+        )
+
+        service = ManualExecutionImportService(
+            conn=conn,
+            order_repo=order_repo,
+            execution_repo=execution_repo,
+            position_repo=position_repo,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="positive integer actual execution price",
+        ):
+            service.import_items(
+                items=[
+                    ManualExecutionImportItem(
+                        client_order_id="COID_ZERO_EXEC_PRICE",
+                        kis_exec_no="EXEC-ZERO-PRICE",
+                        qty=1,
+                        price=0,
+                        executed_at="2026-04-17T09:05:00+09:00",
+                    )
+                ],
+                execute_import=True,
+            )
+
+        order_row = order_repo.get_by_client_order_id("COID_ZERO_EXEC_PRICE")
+        assert order_row.status == DbOrderStatus.SUBMITTED
+        assert execution_repo.list_by_order(order_row.id) == []
+        assert position_repo.get("005930") is None
     finally:
         conn.close()
 

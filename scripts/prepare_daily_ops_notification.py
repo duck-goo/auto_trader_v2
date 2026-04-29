@@ -154,6 +154,105 @@ def _build_default_alert_text(*, title: str, summary: str, lines: list[str]) -> 
     return "\n".join(row for row in rows if row)
 
 
+def _extract_startup_symbol_hint(startup_context: dict[str, Any]) -> str | None:
+    marker = "Review executions first:"
+    for key in ("reconcile_reason_message", "reason"):
+        text = _optional_text(startup_context.get(key))
+        if text is None:
+            continue
+        marker_index = text.find(marker)
+        if marker_index < 0:
+            continue
+        suffix = text[marker_index + len(marker) :].strip()
+        suffix = suffix.rstrip(".")
+        if suffix:
+            return suffix
+    return None
+
+
+def _build_startup_context(report: dict[str, Any]) -> dict[str, Any]:
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return {
+            "available": False,
+            "status_level": "MISSING",
+            "highest_severity": "NONE",
+            "outcome": None,
+            "reason": None,
+            "checked_at": None,
+            "reconcile_reason_code": None,
+            "reconcile_reason_message": None,
+            "reconcile_changed_rows": None,
+            "unresolved_order_count": None,
+            "live_position_count": None,
+            "attention_flags": [],
+            "open_entry_lot_position_mismatch": False,
+        }
+
+    startup = artifacts.get("startup_check")
+    if not isinstance(startup, dict):
+        return {
+            "available": False,
+            "status_level": "MISSING",
+            "highest_severity": "NONE",
+            "outcome": None,
+            "reason": None,
+            "checked_at": None,
+            "reconcile_reason_code": None,
+            "reconcile_reason_message": None,
+            "reconcile_changed_rows": None,
+            "unresolved_order_count": None,
+            "live_position_count": None,
+            "attention_flags": [],
+            "open_entry_lot_position_mismatch": False,
+        }
+
+    reconcile_reason_code = _optional_text(startup.get("reconcile_reason_code"))
+    return {
+        "available": bool(startup.get("exists")),
+        "status_level": startup.get("status_level"),
+        "highest_severity": startup.get("highest_severity"),
+        "outcome": startup.get("outcome"),
+        "reason": startup.get("reason"),
+        "checked_at": startup.get("checked_at"),
+        "reconcile_reason_code": reconcile_reason_code,
+        "reconcile_reason_message": startup.get("reconcile_reason_message"),
+        "reconcile_changed_rows": startup.get("reconcile_changed_rows"),
+        "unresolved_order_count": startup.get("unresolved_order_count"),
+        "live_position_count": startup.get("live_position_count"),
+        "attention_flags": _coerce_lines(startup.get("attention_flags")),
+        "open_entry_lot_position_mismatch": (
+            reconcile_reason_code == "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+        ),
+    }
+
+
+def _refine_notification_content(
+    *,
+    primary_attention_flag: str | None,
+    startup_context: dict[str, Any],
+    summary: str,
+    lines: list[str],
+) -> tuple[str, list[str], bool]:
+    if (
+        primary_attention_flag != "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"
+        or startup_context.get("open_entry_lot_position_mismatch") is not True
+    ):
+        return summary, lines, False
+
+    refined_summary = "Startup blocked by open entry lot position mismatch."
+    refined_lines: list[str] = []
+    symbol_hint = _extract_startup_symbol_hint(startup_context)
+    if symbol_hint is not None:
+        refined_lines.append(f"Affected symbols: {symbol_hint}")
+    else:
+        reason_message = _optional_text(startup_context.get("reconcile_reason_message"))
+        if reason_message is not None:
+            refined_lines.append(reason_message)
+    refined_lines.append("Review executions and lot state before rerunning startup.")
+    return refined_summary, refined_lines, True
+
+
 def _build_notification_payload(
     *,
     report_path: Path,
@@ -168,6 +267,7 @@ def _build_notification_payload(
     attention_flags = report.get("attention_flags")
     action_items = report.get("action_items")
     alert = report.get("alert")
+    startup_context = _build_startup_context(report)
 
     if not isinstance(attention_flags, list):
         attention_flags = []
@@ -176,16 +276,32 @@ def _build_notification_payload(
     if not isinstance(alert, dict):
         alert = {}
 
+    primary_attention_flag = (
+        None if not attention_flags else _optional_text(attention_flags[0])
+    )
     title = _optional_text(alert.get("title")) or f"[{health_outcome}] Daily ops {trade_date}"
     summary = _optional_text(alert.get("summary")) or (
         f"health_outcome={health_outcome}, report_outcome={report_outcome}"
     )
     lines = _coerce_lines(alert.get("lines"))
-    text = _optional_text(alert.get("text")) or _build_default_alert_text(
-        title=title,
+    summary, lines, rebuild_text = _refine_notification_content(
+        primary_attention_flag=primary_attention_flag,
+        startup_context=startup_context,
         summary=summary,
         lines=lines,
     )
+    if rebuild_text:
+        text = _build_default_alert_text(
+            title=title,
+            summary=summary,
+            lines=lines,
+        )
+    else:
+        text = _optional_text(alert.get("text")) or _build_default_alert_text(
+            title=title,
+            summary=summary,
+            lines=lines,
+        )
 
     eligible_outcomes = MIN_LEVEL_TO_OUTCOMES[min_level]
     should_notify = health_outcome in eligible_outcomes
@@ -219,7 +335,12 @@ def _build_notification_payload(
         "artifact_count": artifact_count,
         "attention_flags": attention_flags,
         "action_items": action_items,
+        "primary_attention_flag": primary_attention_flag,
         "top_action_codes": top_action_codes,
+        "primary_action_code": (
+            None if not top_action_codes else top_action_codes[0]
+        ),
+        "startup_context": startup_context,
         "min_level": min_level,
         "should_notify": should_notify,
         "notification_reason": notification_reason,

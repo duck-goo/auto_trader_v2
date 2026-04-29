@@ -168,6 +168,14 @@ def main() -> int:
 
         if result.reason:
             _warn("reason", result.reason)
+        if result.reconcile_result is not None:
+            if result.reconcile_result.reason_code:
+                _warn("reconcile_reason_code", result.reconcile_result.reason_code)
+            if result.reconcile_result.reason_message:
+                _warn(
+                    "reconcile_reason_message",
+                    result.reconcile_result.reason_message,
+                )
 
         if result.live_positions:
             _section("Live Positions")
@@ -183,6 +191,16 @@ def main() -> int:
                 "checked_at": result.checked_at,
                 "trade_date": result.trade_date,
                 "reason": result.reason,
+                "reconcile_reason_code": (
+                    None
+                    if result.reconcile_result is None
+                    else result.reconcile_result.reason_code
+                ),
+                "reconcile_reason_message": (
+                    None
+                    if result.reconcile_result is None
+                    else result.reconcile_result.reason_message
+                ),
                 "universe_snapshot": {
                     "exists": result.universe_snapshot.exists,
                     "candidate_count": result.universe_snapshot.candidate_count,

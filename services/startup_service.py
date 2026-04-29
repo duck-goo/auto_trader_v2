@@ -14,6 +14,7 @@ from broker.base import BrokerInterface
 from services.reconcile_service import ReconcileOutcome, ReconcileResult, ReconcileService
 from services.universe_query_service import UniverseQueryService, UniverseSnapshotResult
 from storage.repositories import (
+    EntryLotRepository,
     OrderRepository,
     PositionRepository,
     PositionRow,
@@ -98,6 +99,7 @@ class StartupService:
             conn=self._conn,
             order_repo=self._order_repo,
             position_repo=self._position_repo,
+            entry_lot_repo=EntryLotRepository(self._conn),
             now_fn=self._now_fn,
         )
         reconcile_result = reconcile_service.reconcile_positions(
@@ -107,6 +109,13 @@ class StartupService:
         live_positions = tuple(self._position_repo.list_all())
 
         if reconcile_result.outcome == ReconcileOutcome.BLOCKED:
+            if reconcile_result.reason_code == "UNRESOLVED_ORDERS_EXIST":
+                reason = "Unresolved orders exist. Startup is blocked."
+            else:
+                reason = (
+                    reconcile_result.reason_message
+                    or "Position reconciliation was blocked. Startup is blocked."
+                )
             return StartupCheckResult(
                 outcome=StartupOutcome.BLOCKED,
                 checked_at=checked_at,
@@ -114,7 +123,7 @@ class StartupService:
                 universe_snapshot=universe_snapshot,
                 reconcile_result=reconcile_result,
                 live_positions=live_positions,
-                reason="Unresolved orders exist. Startup is blocked.",
+                reason=reason,
             )
 
         return StartupCheckResult(

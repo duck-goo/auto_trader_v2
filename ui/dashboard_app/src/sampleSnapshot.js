@@ -6,6 +6,12 @@ export const sampleSnapshot = {
     daily_report_path:
       "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\daily_ops_report.json",
     daily_report_available: true,
+    daily_ops_check_path:
+      "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\daily_ops_check.json",
+    daily_ops_check_available: true,
+    buy_strategy_selection_path:
+      "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\buy_strategy.selection.json",
+    buy_strategy_selection_available: true,
     rehearsal_summary_path:
       "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\rehearsal_latest\\rehearsal_summary.json",
     rehearsal_available: true,
@@ -27,14 +33,63 @@ export const sampleSnapshot = {
       "REVIEW_EXECUTION_RECOVERY",
     ],
   },
+  operator_summary: {
+    available: true,
+    source: "daily_ops_check",
+    status_level: "WARNING",
+    headline: "Startup blocked by open entry lot position mismatch.",
+    detail:
+      "Affected symbols: 005930 | Review executions and lot state before rerunning startup.",
+    overall_outcome: "NOTIFICATION_REQUIRED",
+    overall_reason: "Notification should be sent for startup mismatch.",
+    health_outcome: "WARNING",
+    should_notify: true,
+    dispatch_outcome: "DISPATCHED",
+    primary_attention_flag: "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH",
+    primary_action_code: "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK",
+    startup_open_entry_lot_position_mismatch: true,
+    affected_symbols: "005930",
+  },
+  startup: {
+    available: true,
+    status_level: "WARNING",
+    highest_severity: "WARNING",
+    outcome: "BLOCKED",
+    reason: "Startup is blocked because reconcile found an open entry lot mismatch.",
+    checked_at: "2026-04-20T08:59:00+09:00",
+    universe_exists: true,
+    universe_candidate_count: 25,
+    reconcile_changed_rows: 1,
+    unresolved_order_count: 0,
+    live_position_count: 1,
+    reconcile_reason_code: "OPEN_ENTRY_LOT_POSITION_MISMATCH",
+    reconcile_reason_message:
+      "Reconciliation would change positions for symbols that still have open entry lots. Review executions first: 005930",
+    attention_flags: ["STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"],
+  },
   controls: {
     kill_switch_enabled: true,
     kill_switch_note: "manual emergency stop",
     kill_switch_updated_at: "2026-04-20T11:10:00+09:00",
     kill_switch_status_level: "CRITICAL",
   },
+  strategy: {
+    selection_available: true,
+    source: "selection_artifact",
+    selection_path:
+      "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\buy_strategy.selection.json",
+    buy_strategy: "timing2",
+    effective_buy_strategy: "timing2",
+    run_timing1: false,
+    run_timing2: true,
+    updated_at: "2026-04-20T11:12:00+09:00",
+    note: "focus on confirmed Timing2 revision",
+    applies_to_next_run: true,
+    status_level: "READY",
+  },
   scan: {
     live_preview: {
+      card_key: "scan-live-preview",
       available: true,
       status_level: "READY",
       highest_severity: "NONE",
@@ -51,6 +106,7 @@ export const sampleSnapshot = {
       attention_flags: [],
     },
     live_execute: {
+      card_key: "scan-live-execute",
       available: true,
       status_level: "WARNING",
       highest_severity: "WARNING",
@@ -67,6 +123,7 @@ export const sampleSnapshot = {
       attention_flags: ["TRADING_SESSION_EXECUTE_BLOCKED"],
     },
     rehearsal_validation: {
+      card_key: "scan-rehearsal-validation",
       status_level: "READY",
       session_outcome: "COMPLETED",
       polling_stop_reason: "MAX_CYCLES_REACHED",
@@ -77,6 +134,7 @@ export const sampleSnapshot = {
   },
   executions: {
     buy_preview: {
+      card_key: "execution-buy-preview",
       available: true,
       status_level: "READY",
       highest_severity: "NONE",
@@ -88,6 +146,7 @@ export const sampleSnapshot = {
       attention_flags: [],
     },
     buy_execute: {
+      card_key: "execution-buy-execute",
       available: false,
       status_level: "MISSING",
       highest_severity: "NONE",
@@ -99,6 +158,7 @@ export const sampleSnapshot = {
       attention_flags: [],
     },
     sell_preview: {
+      card_key: "execution-sell-preview",
       available: true,
       status_level: "READY",
       highest_severity: "NONE",
@@ -110,6 +170,7 @@ export const sampleSnapshot = {
       attention_flags: [],
     },
     sell_execute: {
+      card_key: "execution-sell-execute",
       available: true,
       status_level: "CRITICAL",
       highest_severity: "CRITICAL",
@@ -123,6 +184,7 @@ export const sampleSnapshot = {
   },
   recovery: {
     order_maintenance_preview: {
+      card_key: "recovery-maintenance-preview",
       available: true,
       status_level: "WARNING",
       highest_severity: "WARNING",
@@ -130,6 +192,7 @@ export const sampleSnapshot = {
       attention_flags: ["MANUAL_RECOVERY_REQUIRED"],
     },
     order_maintenance_execute: {
+      card_key: "recovery-maintenance-execute",
       available: false,
       status_level: "MISSING",
       highest_severity: "NONE",
@@ -137,6 +200,7 @@ export const sampleSnapshot = {
       attention_flags: [],
     },
     execution_recovery_review: {
+      card_key: "recovery-execution-review",
       available: true,
       status_level: "WARNING",
       highest_severity: "WARNING",

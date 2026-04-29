@@ -33,11 +33,29 @@ export function normalizeSnapshot(snapshot) {
       !Array.isArray(safeSnapshot.overview)
         ? safeSnapshot.overview
         : {},
+    operator_summary:
+      safeSnapshot.operator_summary &&
+      typeof safeSnapshot.operator_summary === "object" &&
+      !Array.isArray(safeSnapshot.operator_summary)
+        ? safeSnapshot.operator_summary
+        : {},
+    startup:
+      safeSnapshot.startup &&
+      typeof safeSnapshot.startup === "object" &&
+      !Array.isArray(safeSnapshot.startup)
+        ? safeSnapshot.startup
+        : {},
     controls:
       safeSnapshot.controls &&
       typeof safeSnapshot.controls === "object" &&
       !Array.isArray(safeSnapshot.controls)
         ? safeSnapshot.controls
+        : {},
+    strategy:
+      safeSnapshot.strategy &&
+      typeof safeSnapshot.strategy === "object" &&
+      !Array.isArray(safeSnapshot.strategy)
+        ? safeSnapshot.strategy
         : {},
     scan:
       safeSnapshot.scan &&

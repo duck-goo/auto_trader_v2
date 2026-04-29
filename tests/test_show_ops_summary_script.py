@@ -226,6 +226,99 @@ def test_main_reads_from_output_dir_and_returns_blocked(
     ]
 
 
+def test_main_exposes_open_entry_lot_startup_block_reason(
+    test_db_path,
+    monkeypatch,
+):
+    summary_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_ops_summary_open_lot_blocked"
+    )
+    summary_path = summary_dir / "rehearsal_summary.json"
+    output_path = summary_dir / "normalized.json"
+
+    _write_json(
+        summary_path,
+        {
+            "trade_date": "2026-04-20",
+            "mode": "mock",
+            "started_at": "2026-04-20T09:05:00+09:00",
+            "finished_at": "2026-04-20T09:05:01+09:00",
+            "overall_outcome": "STARTUP_BLOCKED",
+            "overall_reason": "Open entry lot reconcile block.",
+            "include_after_close": False,
+            "intraday_window": {},
+            "steps": [
+                {
+                    "name": "Startup Check",
+                    "exit_code": 4,
+                    "outcome": "BLOCKED",
+                    "reason": "Open entry lot reconcile block.",
+                    "output_path": str(summary_dir / "startup_check.json"),
+                    "result": {
+                        "trade_date": "2026-04-20",
+                        "checked_at": "2026-04-20T08:59:00+09:00",
+                        "outcome": "BLOCKED",
+                        "reason": (
+                            "Reconciliation would change positions for symbols "
+                            "that still have open entry lots."
+                        ),
+                        "reconcile_reason_code": "OPEN_ENTRY_LOT_POSITION_MISMATCH",
+                        "reconcile_reason_message": (
+                            "Reconciliation would change positions for symbols "
+                            "that still have open entry lots. Review executions "
+                            "first: 005930"
+                        ),
+                        "reconcile_changed_rows": 1,
+                        "universe_snapshot": {
+                            "exists": True,
+                            "candidate_count": 5,
+                            "refreshed_at": "2026-04-20T08:30:00+09:00",
+                        },
+                        "unresolved_orders": [],
+                        "live_positions": [
+                            {
+                                "symbol": "005930",
+                                "qty": 2,
+                                "avg_price": 71000,
+                                "updated_at": "2026-04-20T08:58:00+09:00",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(summary_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    startup_step = payload["steps"][0]
+    assert payload["step_status_counts"] == {
+        "ok": 0,
+        "warning": 1,
+        "failed": 0,
+    }
+    assert startup_step["status_level"] == "WARNING"
+    assert startup_step["reconcile_reason_code"] == "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    assert startup_step["reconcile_reason_message"].endswith("005930")
+    assert startup_step["reconcile_changed_rows"] == 1
+    assert startup_step["live_position_count"] == 1
+    assert startup_step["warning_flags"] == [
+        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH",
+    ]
+
+
 def test_main_falls_back_to_child_output_when_step_result_is_missing(
     test_db_path,
     monkeypatch,

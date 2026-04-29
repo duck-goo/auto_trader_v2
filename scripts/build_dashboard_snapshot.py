@@ -3,6 +3,7 @@ Build one frontend-ready dashboard snapshot from ops artifacts.
 
 Inputs:
 - daily_ops_report.json created by show_daily_ops_report.py
+- daily_ops_check.json created by run_daily_ops_check.py
 - latest rehearsal_summary.json created by run_mock_operational_rehearsal.py
 
 Safety:
@@ -26,8 +27,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import scripts.show_ops_summary as ops_summary_script
+from strategy import (
+    BUY_STRATEGY_BOTH,
+    BUY_STRATEGY_CHOICES,
+    resolve_buy_strategy_selection,
+)
 
 KST = pytz.timezone("Asia/Seoul")
+BUY_STRATEGY_SELECTION_FILE = "buy_strategy.selection.json"
+DAILY_OPS_CHECK_FILE = "daily_ops_check.json"
 
 
 def _section(title: str) -> None:
@@ -67,6 +75,11 @@ def _parse_args() -> argparse.Namespace:
         "--daily-report-input",
         default=None,
         help="Optional path to daily_ops_report.json.",
+    )
+    parser.add_argument(
+        "--daily-check-input",
+        default=None,
+        help="Optional path to daily_ops_check.json.",
     )
     parser.add_argument(
         "--rehearsal-input",
@@ -166,6 +179,13 @@ def _status_level_from_health_outcome(health_outcome: str | None) -> str:
     return "NO_DATA"
 
 
+def _normalize_status_level(value: Any, fallback: str = "MISSING") -> str:
+    text = _optional_text(value)
+    if text in ("READY", "WARNING", "CRITICAL", "FAILED", "MISSING", "NO_DATA"):
+        return text
+    return fallback
+
+
 def _artifact_row(artifacts: dict[str, Any], key: str) -> dict[str, Any]:
     row = artifacts.get(key)
     if isinstance(row, dict):
@@ -187,6 +207,30 @@ def _coerce_attention_flags(value: Any) -> list[str]:
         if text is not None:
             flags.append(text)
     return flags
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    rows: list[str] = []
+    for item in value:
+        text = _optional_text(item)
+        if text is not None:
+            rows.append(text)
+    return rows
+
+
+def _extract_symbol_hint(text: Any) -> str | None:
+    normalized = _optional_text(text)
+    if normalized is None:
+        return None
+    markers = ("Affected symbols:", "Review executions first:")
+    for marker in markers:
+        if marker not in normalized:
+            continue
+        suffix = normalized.split(marker, 1)[1].strip()
+        return suffix or None
+    return None
 
 
 def _build_overview(report: dict[str, Any] | None) -> dict[str, Any]:
@@ -277,6 +321,102 @@ def _build_controls(report: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _build_startup_section(report: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        return {
+            "available": False,
+            "status_level": "MISSING",
+            "highest_severity": "NONE",
+            "outcome": None,
+            "reason": None,
+            "checked_at": None,
+            "universe_exists": None,
+            "universe_candidate_count": None,
+            "reconcile_changed_rows": None,
+            "unresolved_order_count": None,
+            "live_position_count": None,
+            "reconcile_reason_code": None,
+            "reconcile_reason_message": None,
+            "attention_flags": [],
+        }
+
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    row = _artifact_row(artifacts, "startup_check")
+    return {
+        "available": bool(row.get("exists")),
+        "status_level": row.get("status_level"),
+        "highest_severity": row.get("highest_severity"),
+        "outcome": row.get("outcome"),
+        "reason": row.get("reason"),
+        "checked_at": row.get("checked_at"),
+        "universe_exists": row.get("universe_exists"),
+        "universe_candidate_count": row.get("universe_candidate_count"),
+        "reconcile_changed_rows": row.get("reconcile_changed_rows"),
+        "unresolved_order_count": row.get("unresolved_order_count"),
+        "live_position_count": row.get("live_position_count"),
+        "reconcile_reason_code": row.get("reconcile_reason_code"),
+        "reconcile_reason_message": row.get("reconcile_reason_message"),
+        "attention_flags": _coerce_attention_flags(row.get("attention_flags")),
+    }
+
+
+def _build_strategy_section(
+    strategy_selection_path: Path,
+    strategy_selection: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(strategy_selection, dict):
+        return {
+            "selection_available": False,
+            "source": "default",
+            "selection_path": str(strategy_selection_path),
+            "buy_strategy": BUY_STRATEGY_BOTH,
+            "effective_buy_strategy": BUY_STRATEGY_BOTH,
+            "run_timing1": True,
+            "run_timing2": True,
+            "updated_at": None,
+            "note": None,
+            "applies_to_next_run": True,
+        }
+
+    buy_strategy = _optional_text(strategy_selection.get("buy_strategy"))
+    if buy_strategy not in BUY_STRATEGY_CHOICES:
+        return {
+            "selection_available": True,
+            "source": "selection_artifact",
+            "selection_path": str(strategy_selection_path),
+            "buy_strategy": None,
+            "effective_buy_strategy": None,
+            "run_timing1": None,
+            "run_timing2": None,
+            "updated_at": strategy_selection.get("updated_at"),
+            "note": strategy_selection.get("note"),
+            "applies_to_next_run": True,
+            "status_level": "WARNING",
+            "warning": "Invalid buy_strategy in selection artifact.",
+        }
+
+    run_timing1, run_timing2 = resolve_buy_strategy_selection(
+        buy_strategy=buy_strategy,
+        scan_timing1=False,
+        scan_timing2=False,
+    )
+    return {
+        "selection_available": True,
+        "source": "selection_artifact",
+        "selection_path": str(strategy_selection_path),
+        "buy_strategy": buy_strategy,
+        "effective_buy_strategy": buy_strategy,
+        "run_timing1": run_timing1,
+        "run_timing2": run_timing2,
+        "updated_at": strategy_selection.get("updated_at"),
+        "note": strategy_selection.get("note"),
+        "applies_to_next_run": True,
+        "status_level": "READY",
+    }
+
+
 def _build_trading_session_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "available": bool(row.get("exists")),
@@ -318,6 +458,12 @@ def _build_recovery_row(row: dict[str, Any]) -> dict[str, Any]:
         "manual_recovery_required_count": row.get("manual_recovery_required_count"),
         "attention_flags": _coerce_attention_flags(row.get("attention_flags")),
     }
+
+
+def _with_card_key(payload: dict[str, Any], card_key: str) -> dict[str, Any]:
+    row = dict(payload)
+    row["card_key"] = card_key
+    return row
 
 
 def _find_ops_summary_step(
@@ -431,13 +577,22 @@ def _build_scan_section(
             artifacts = raw_artifacts
 
     return {
-        "live_preview": _build_trading_session_row(
-            _artifact_row(artifacts, "trading_session_preview")
+        "live_preview": _with_card_key(
+            _build_trading_session_row(
+                _artifact_row(artifacts, "trading_session_preview")
+            ),
+            "scan-live-preview",
         ),
-        "live_execute": _build_trading_session_row(
-            _artifact_row(artifacts, "trading_session_execute")
+        "live_execute": _with_card_key(
+            _build_trading_session_row(
+                _artifact_row(artifacts, "trading_session_execute")
+            ),
+            "scan-live-execute",
         ),
-        "rehearsal_validation": rehearsal_section["trading_session"],
+        "rehearsal_validation": _with_card_key(
+            rehearsal_section["trading_session"],
+            "scan-rehearsal-validation",
+        ),
     }
 
 
@@ -449,17 +604,29 @@ def _build_executions_section(report: dict[str, Any] | None) -> dict[str, Any]:
             artifacts = raw_artifacts
 
     return {
-        "buy_preview": _build_execution_row(
-            _artifact_row(artifacts, "execute_buy_signals_preview")
+        "buy_preview": _with_card_key(
+            _build_execution_row(
+                _artifact_row(artifacts, "execute_buy_signals_preview")
+            ),
+            "execution-buy-preview",
         ),
-        "buy_execute": _build_execution_row(
-            _artifact_row(artifacts, "execute_buy_signals_execute")
+        "buy_execute": _with_card_key(
+            _build_execution_row(
+                _artifact_row(artifacts, "execute_buy_signals_execute")
+            ),
+            "execution-buy-execute",
         ),
-        "sell_preview": _build_execution_row(
-            _artifact_row(artifacts, "execute_sell_signals_preview")
+        "sell_preview": _with_card_key(
+            _build_execution_row(
+                _artifact_row(artifacts, "execute_sell_signals_preview")
+            ),
+            "execution-sell-preview",
         ),
-        "sell_execute": _build_execution_row(
-            _artifact_row(artifacts, "execute_sell_signals_execute")
+        "sell_execute": _with_card_key(
+            _build_execution_row(
+                _artifact_row(artifacts, "execute_sell_signals_execute")
+            ),
+            "execution-sell-execute",
         ),
     }
 
@@ -473,21 +640,28 @@ def _build_recovery_section(report: dict[str, Any] | None) -> dict[str, Any]:
 
     review_row = _artifact_row(artifacts, "execution_recovery_review")
     return {
-        "order_maintenance_preview": _build_recovery_row(
-            _artifact_row(artifacts, "order_maintenance_preview")
+        "order_maintenance_preview": _with_card_key(
+            _build_recovery_row(_artifact_row(artifacts, "order_maintenance_preview")),
+            "recovery-maintenance-preview",
         ),
-        "order_maintenance_execute": _build_recovery_row(
-            _artifact_row(artifacts, "order_maintenance_execute")
+        "order_maintenance_execute": _with_card_key(
+            _build_recovery_row(_artifact_row(artifacts, "order_maintenance_execute")),
+            "recovery-maintenance-execute",
         ),
-        "execution_recovery_review": {
-            "available": bool(review_row.get("exists")),
-            "status_level": review_row.get("status_level"),
-            "highest_severity": review_row.get("highest_severity"),
-            "manual_recovery_required_count": review_row.get(
-                "manual_recovery_required_count"
-            ),
-            "attention_flags": _coerce_attention_flags(review_row.get("attention_flags")),
-        },
+        "execution_recovery_review": _with_card_key(
+            {
+                "available": bool(review_row.get("exists")),
+                "status_level": review_row.get("status_level"),
+                "highest_severity": review_row.get("highest_severity"),
+                "manual_recovery_required_count": review_row.get(
+                    "manual_recovery_required_count"
+                ),
+                "attention_flags": _coerce_attention_flags(
+                    review_row.get("attention_flags")
+                ),
+            },
+            "recovery-execution-review",
+        ),
     }
 
 
@@ -523,6 +697,170 @@ def _build_actions_section(report: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _build_operator_summary_from_daily_check(
+    daily_check: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(daily_check, dict):
+        return None
+
+    operator_summary = daily_check.get("operator_summary")
+    if not isinstance(operator_summary, dict):
+        return None
+
+    headline = _optional_text(operator_summary.get("headline"))
+    detail = _optional_text(operator_summary.get("detail"))
+    primary_attention_flag = _optional_text(
+        operator_summary.get("primary_attention_flag")
+    )
+    if headline is None and detail is None and primary_attention_flag is None:
+        return None
+
+    affected_symbols = _optional_text(operator_summary.get("affected_symbols"))
+    if affected_symbols is None:
+        affected_symbols = _extract_symbol_hint(detail)
+
+    status_level = _status_level_from_health_outcome(
+        _optional_text(operator_summary.get("health_outcome"))
+    )
+    if status_level == "NO_DATA":
+        if operator_summary.get("startup_open_entry_lot_position_mismatch") is True:
+            status_level = "WARNING"
+        elif _optional_text(operator_summary.get("primary_attention_flag")) is not None:
+            status_level = "WARNING"
+        else:
+            status_level = "MISSING"
+
+    return {
+        "available": True,
+        "source": "daily_ops_check",
+        "status_level": status_level,
+        "headline": headline,
+        "detail": detail,
+        "overall_outcome": daily_check.get("overall_outcome"),
+        "overall_reason": daily_check.get("overall_reason"),
+        "health_outcome": operator_summary.get("health_outcome"),
+        "should_notify": daily_check.get("should_notify"),
+        "dispatch_outcome": operator_summary.get("dispatch_outcome"),
+        "primary_attention_flag": primary_attention_flag,
+        "primary_action_code": _optional_text(
+            operator_summary.get("primary_action_code")
+        ),
+        "startup_open_entry_lot_position_mismatch": (
+            operator_summary.get("startup_open_entry_lot_position_mismatch") is True
+        ),
+        "affected_symbols": affected_symbols,
+    }
+
+
+def _build_operator_summary_from_daily_report(
+    daily_report: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(daily_report, dict):
+        return {
+            "available": False,
+            "source": "none",
+            "status_level": "MISSING",
+            "headline": None,
+            "detail": None,
+            "overall_outcome": None,
+            "overall_reason": None,
+            "health_outcome": None,
+            "should_notify": None,
+            "dispatch_outcome": None,
+            "primary_attention_flag": None,
+            "primary_action_code": None,
+            "startup_open_entry_lot_position_mismatch": False,
+            "affected_symbols": None,
+        }
+
+    alert = daily_report.get("alert")
+    alert_summary = None
+    alert_lines: list[str] = []
+    alert_level = None
+    if isinstance(alert, dict):
+        alert_summary = _optional_text(alert.get("summary"))
+        alert_lines = _coerce_string_list(alert.get("lines"))
+        alert_level = _optional_text(alert.get("level"))
+
+    action_items = daily_report.get("action_items")
+    primary_action_code = None
+    if isinstance(action_items, list):
+        for row in action_items:
+            if not isinstance(row, dict):
+                continue
+            primary_action_code = _optional_text(row.get("action_code"))
+            if primary_action_code is not None:
+                break
+
+    startup = _build_startup_section(daily_report)
+    startup_mismatch = (
+        startup.get("reconcile_reason_code") == "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    )
+    primary_attention_flag = None
+    startup_flags = _coerce_attention_flags(startup.get("attention_flags"))
+    if startup_flags:
+        primary_attention_flag = startup_flags[0]
+    else:
+        report_flags = _coerce_attention_flags(daily_report.get("attention_flags"))
+        if report_flags:
+            primary_attention_flag = report_flags[0]
+
+    detail = None
+    if alert_lines:
+        detail = " | ".join(alert_lines[:2])
+
+    if startup_mismatch:
+        headline = "Startup blocked by open entry lot position mismatch."
+        detail = (
+            _optional_text(startup.get("reconcile_reason_message"))
+            or detail
+            or "Review executions and lot state before rerunning startup."
+        )
+    elif alert_summary is not None:
+        headline = alert_summary
+    elif daily_report.get("health_outcome") == "READY":
+        headline = "Daily ops looks ready."
+        detail = detail or "No attention flags detected."
+    else:
+        headline = "Daily ops requires review."
+        detail = detail or "Review the latest action items before live trading."
+
+    return {
+        "available": True,
+        "source": "daily_ops_report_fallback",
+        "status_level": _normalize_status_level(
+            alert_level,
+            fallback=_status_level_from_health_outcome(
+                _optional_text(daily_report.get("health_outcome"))
+            ),
+        ),
+        "headline": headline,
+        "detail": detail,
+        "overall_outcome": daily_report.get("report_outcome"),
+        "overall_reason": None,
+        "health_outcome": daily_report.get("health_outcome"),
+        "should_notify": None,
+        "dispatch_outcome": None,
+        "primary_attention_flag": primary_attention_flag,
+        "primary_action_code": primary_action_code,
+        "startup_open_entry_lot_position_mismatch": startup_mismatch,
+        "affected_symbols": _extract_symbol_hint(
+            startup.get("reconcile_reason_message")
+        ),
+    }
+
+
+def _build_operator_summary(
+    *,
+    daily_report: dict[str, Any] | None,
+    daily_check: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from_daily_check = _build_operator_summary_from_daily_check(daily_check)
+    if from_daily_check is not None:
+        return from_daily_check
+    return _build_operator_summary_from_daily_report(daily_report)
+
+
 def _normalize_rehearsal_summary(
     summary_path: Path | None,
     payload: dict[str, Any] | None,
@@ -538,6 +876,10 @@ def _build_snapshot_payload(
     ops_dir: Path,
     daily_report_path: Path,
     daily_report: dict[str, Any] | None,
+    daily_ops_check_path: Path,
+    daily_ops_check: dict[str, Any] | None,
+    strategy_selection_path: Path,
+    strategy_selection: dict[str, Any] | None,
     rehearsal_path: Path | None,
     normalized_rehearsal: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -552,13 +894,26 @@ def _build_snapshot_payload(
             "ops_dir": str(ops_dir),
             "daily_report_path": str(daily_report_path),
             "daily_report_available": daily_report is not None,
+            "daily_ops_check_path": str(daily_ops_check_path),
+            "daily_ops_check_available": daily_ops_check is not None,
+            "buy_strategy_selection_path": str(strategy_selection_path),
+            "buy_strategy_selection_available": strategy_selection is not None,
             "rehearsal_summary_path": (
                 None if rehearsal_path is None else str(rehearsal_path)
             ),
             "rehearsal_available": normalized_rehearsal is not None,
         },
+        "operator_summary": _build_operator_summary(
+            daily_report=daily_report,
+            daily_check=daily_ops_check,
+        ),
         "overview": _build_overview(daily_report),
+        "startup": _build_startup_section(daily_report),
         "controls": _build_controls(daily_report),
+        "strategy": _build_strategy_section(
+            strategy_selection_path,
+            strategy_selection,
+        ),
         "scan": _build_scan_section(
             report=daily_report,
             rehearsal_section=rehearsal_section,
@@ -575,6 +930,7 @@ def build_dashboard_snapshot_document(
     trade_date: str,
     ops_dir: str | Path | None = None,
     daily_report_input: str | Path | None = None,
+    daily_check_input: str | Path | None = None,
     rehearsal_input: str | Path | None = None,
 ) -> tuple[dict[str, Any], Path, Path, Path | None]:
     resolved_ops_dir = (
@@ -587,6 +943,11 @@ def build_dashboard_snapshot_document(
         if daily_report_input is not None
         else resolved_ops_dir / "daily_ops_report.json"
     )
+    resolved_daily_ops_check_path = (
+        _resolve_optional_path(daily_check_input)
+        if daily_check_input is not None
+        else resolved_ops_dir / DAILY_OPS_CHECK_FILE
+    )
     resolved_rehearsal_path = (
         _resolve_optional_path(rehearsal_input)
         if rehearsal_input is not None
@@ -594,6 +955,11 @@ def build_dashboard_snapshot_document(
     )
 
     daily_report = _load_optional_json(resolved_daily_report_path)
+    daily_ops_check = _load_optional_json(resolved_daily_ops_check_path)
+    resolved_strategy_selection_path = (
+        resolved_ops_dir / BUY_STRATEGY_SELECTION_FILE
+    )
+    strategy_selection = _load_optional_json(resolved_strategy_selection_path)
     rehearsal_payload = (
         None
         if resolved_rehearsal_path is None
@@ -608,6 +974,10 @@ def build_dashboard_snapshot_document(
         ops_dir=resolved_ops_dir,
         daily_report_path=resolved_daily_report_path,
         daily_report=daily_report,
+        daily_ops_check_path=resolved_daily_ops_check_path,
+        daily_ops_check=daily_ops_check,
+        strategy_selection_path=resolved_strategy_selection_path,
+        strategy_selection=strategy_selection,
         rehearsal_path=resolved_rehearsal_path,
         normalized_rehearsal=normalized_rehearsal,
     )
@@ -628,6 +998,7 @@ def main() -> int:
                 trade_date=args.trade_date,
                 ops_dir=args.ops_dir,
                 daily_report_input=args.daily_report_input,
+                daily_check_input=args.daily_check_input,
                 rehearsal_input=args.rehearsal_input,
             )
         )
@@ -649,6 +1020,10 @@ def main() -> int:
         str(payload["sources"]["daily_report_available"]),
     )
     _ok(
+        "daily_ops_check_available",
+        str(payload["sources"]["daily_ops_check_available"]),
+    )
+    _ok(
         "rehearsal_available",
         str(payload["sources"]["rehearsal_available"]),
     )
@@ -658,7 +1033,11 @@ def main() -> int:
         _warn("top_action_codes", ", ".join(payload["actions"]["top_action_codes"]))
     _ok("json_saved", str(output_path))
 
-    if not payload["sources"]["daily_report_available"] and not payload["sources"]["rehearsal_available"]:
+    if (
+        not payload["sources"]["daily_report_available"]
+        and not payload["sources"]["daily_ops_check_available"]
+        and not payload["sources"]["rehearsal_available"]
+    ):
         return 4
     return 0
 

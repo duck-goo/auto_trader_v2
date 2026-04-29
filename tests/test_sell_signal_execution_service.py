@@ -535,6 +535,9 @@ def test_execute_lot_signal_uses_payload_sell_qty_not_full_position(test_db_path
         assert audit_rows[0].payload["requested_sell_qty"] == 3
         assert audit_rows[0].payload["order_qty"] == 3
         assert audit_rows[0].payload["sell_cost_rate"] == 0.002140527
+        assert audit_rows[0].payload["source_lot_remaining_qty_before"] == 5
+        assert audit_rows[0].payload["source_lot_realized_sell_qty_before"] == 0
+        assert audit_rows[0].payload["source_lot_status_before"] == "OPEN"
     finally:
         conn.close()
 

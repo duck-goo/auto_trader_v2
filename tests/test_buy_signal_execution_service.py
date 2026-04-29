@@ -27,6 +27,7 @@ from storage.db import get_connection, transaction
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
     DailyStatsRepository,
+    EntryLotRepository,
     ExecutionRepository,
     DbOrderStatus,
     OrderRepository,
@@ -143,6 +144,7 @@ def _make_service(
     position_repo: PositionRepository,
     broker: MagicMock,
     order_service: MagicMock,
+    entry_lot_repo: EntryLotRepository | None = None,
 ) -> BuySignalExecutionService:
     return BuySignalExecutionService(
         broker=broker,
@@ -157,6 +159,7 @@ def _make_service(
             daily_stats_repo=DailyStatsRepository(conn),
             now_fn=_fixed_now,
         ),
+        entry_lot_repo=entry_lot_repo,
         now_fn=_fixed_now,
     )
 
@@ -168,6 +171,62 @@ def _settings() -> BuySignalExecutionSettings:
         start_time="09:00:00",
         cutoff_time="12:00:00",
     )
+
+
+def _seed_filled_timing2_lot(
+    conn,
+    *,
+    symbol: str,
+    strategy_name: str,
+    client_order_id: str,
+    qty: int = 3,
+    price: int = 70_000,
+) -> None:
+    order_repo = OrderRepository(conn)
+    execution_repo = ExecutionRepository(conn)
+    position_repo = PositionRepository(conn)
+    entry_lot_repo = EntryLotRepository(conn)
+    executed_at = "2026-04-16T09:02:00+09:00"
+
+    with transaction(conn):
+        order = order_repo.create(
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side="buy",
+            qty=qty,
+            price=0,
+            order_type="MARKET",
+            strategy_name=strategy_name,
+            requested_at=executed_at,
+        )
+        execution_repo.insert_if_new(
+            order_id=order.id,
+            kis_exec_no=f"EXEC-{client_order_id}",
+            symbol=symbol,
+            side="buy",
+            qty=qty,
+            price=price,
+            executed_at=executed_at,
+        )
+        order_repo.mark_filled(
+            client_order_id=client_order_id,
+            closed_at=executed_at,
+        )
+        position_repo.apply_execution(
+            symbol=symbol,
+            side="buy",
+            qty=qty,
+            price=price,
+            executed_at=executed_at,
+        )
+        entry_lot_repo.apply_buy_execution(
+            entry_order_id=order.id,
+            symbol=symbol,
+            qty=qty,
+            price=price,
+            executed_at=executed_at,
+            entry_strategy_name=strategy_name,
+        )
 
 
 def test_preview_prefers_timing1_and_keeps_signals_unacted(test_db_path):
@@ -351,8 +410,114 @@ def test_preview_blocks_timing2_30s_second_entry_until_lot_storage_exists(
 
         assert result.blocked_count == 1
         assert result.candidates[0].outcome == BuySignalExecutionOutcome.BLOCKED
-        assert result.candidates[0].reason_code == "LIVE_POSITION_EXISTS"
+        assert result.candidates[0].reason_code == "ENTRY_LOT_REPOSITORY_REQUIRED"
         assert signal_repo.get(signal_id).acted is False
+        broker.get_current_price.assert_not_called()
+        order_service.place_order.assert_not_called()
+    finally:
+        conn.close()
+
+
+def test_preview_allows_timing2_range_entry_when_morning_lot_exists(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+        entry_lot_repo = EntryLotRepository(conn)
+
+        _seed_filled_timing2_lot(
+            conn,
+            symbol="005930",
+            strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+            client_order_id="20260416090200-buy-005930-morning",
+        )
+        _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T10:00:30+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_balance.return_value = _make_balance()
+        broker.get_current_price.return_value = _make_price_snapshot("005930")
+        order_service = MagicMock(spec=OrderService)
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+            entry_lot_repo=entry_lot_repo,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=False,
+        )
+
+        assert result.preview_ready_count == 1
+        assert result.blocked_count == 0
+        assert result.candidates[0].source_strategy_name == (
+            STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER
+        )
+        order_service.place_order.assert_not_called()
+    finally:
+        conn.close()
+
+
+def test_preview_blocks_timing2_when_same_entry_slot_is_open(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+        entry_lot_repo = EntryLotRepository(conn)
+
+        _seed_filled_timing2_lot(
+            conn,
+            symbol="005930",
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+            client_order_id="20260416100100-buy-005930-range",
+        )
+        _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T10:02:00+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_balance.return_value = _make_balance()
+        order_service = MagicMock(spec=OrderService)
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+            entry_lot_repo=entry_lot_repo,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=False,
+        )
+
+        assert result.blocked_count == 1
+        assert result.candidates[0].outcome == BuySignalExecutionOutcome.BLOCKED
+        assert result.candidates[0].reason_code == "TIMING2_ENTRY_SLOT_ALREADY_USED"
         broker.get_current_price.assert_not_called()
         order_service.place_order.assert_not_called()
     finally:

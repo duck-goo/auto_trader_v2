@@ -842,6 +842,8 @@ def main() -> int:
                         order_repo=order_repo,
                         execution_repo=execution_repo,
                         sync_service=sync_service,
+                        entry_lot_repo=entry_lot_repo,
+                        signal_repo=signal_repo,
                     ),
                     stale_buy_cancel_service=StaleBuyOrderCancelService(
                         order_repo=order_repo,
@@ -921,6 +923,7 @@ def main() -> int:
                     position_repo=position_repo,
                     order_service=order_service,
                     risk_guard_service=risk_guard_service,
+                    entry_lot_repo=entry_lot_repo,
                 ),
             )
 

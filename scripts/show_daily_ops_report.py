@@ -188,6 +188,9 @@ def _summarize_startup(*, path: Path, payload: dict[str, Any] | None) -> dict[st
             "checked_at": payload.get("checked_at"),
             "outcome": payload.get("outcome"),
             "reason": payload.get("reason"),
+            "reconcile_reason_code": payload.get("reconcile_reason_code"),
+            "reconcile_reason_message": payload.get("reconcile_reason_message"),
+            "reconcile_changed_rows": payload.get("reconcile_changed_rows"),
             "universe_exists": (
                 None
                 if not isinstance(universe_snapshot, dict)
@@ -718,7 +721,13 @@ def _collect_attention_flags(
 
     startup = summaries["startup_check"]
     if startup.get("exists") and startup.get("outcome") != "READY":
-        flags.append("STARTUP_NOT_READY")
+        if (
+            _optional_text(startup.get("reconcile_reason_code"))
+            == "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+        ):
+            flags.append("STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH")
+        else:
+            flags.append("STARTUP_NOT_READY")
 
     for label in ("trading_session_preview", "trading_session_execute"):
         row = summaries[label]
@@ -848,7 +857,10 @@ def _resolve_reference_path_for_flag(
             latest_kill_switch.get("path")
         )
 
-    if flag == "STARTUP_NOT_READY":
+    if flag in (
+        "STARTUP_NOT_READY",
+        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH",
+    ):
         return _optional_text(summaries["startup_check"].get("path"))
 
     if flag.startswith("TRADING_SESSION_"):
@@ -932,6 +944,16 @@ def _build_attention_message(
         if note:
             return f"Kill switch is enabled. note={note}"
         return "Kill switch is enabled."
+
+    if flag == "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH":
+        return (
+            _optional_text(summaries["startup_check"].get("reconcile_reason_message"))
+            or _optional_text(summaries["startup_check"].get("reason"))
+            or (
+                "Startup reconciliation is blocked because open entry lots would "
+                "change the local position state."
+            )
+        )
 
     if flag == "STARTUP_NOT_READY":
         reason = _optional_text(summaries["startup_check"].get("reason"))
@@ -1106,6 +1128,25 @@ def _build_action_item_for_flag(
             suggested_command=(
                 f".\\venv\\Scripts\\python.exe scripts\\set_kill_switch.py "
                 f"--output .\\data\\ops\\{trade_date}\\kill_switch.status.json"
+            ),
+        )
+
+    if flag == "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH":
+        return _build_action_item(
+            action_code="REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK",
+            severity=severity,
+            flag=flag,
+            summary=(
+                "Startup was blocked because reconcile would change symbols "
+                "that still have open entry lots. Review executions and lot "
+                "state before rerunning startup."
+            ),
+            detail=message,
+            reference_path=reference_path,
+            suggested_command=(
+                f".\\venv\\Scripts\\python.exe scripts\\startup_check.py "
+                f"--trade-date {trade_date} "
+                f"--output .\\data\\ops\\{trade_date}\\startup_check.json"
             ),
         )
 
@@ -1424,7 +1465,10 @@ def _resolve_summary_key_for_flag(
             latest_kill_switch.get("label")
         )
 
-    if flag == "STARTUP_NOT_READY":
+    if flag in (
+        "STARTUP_NOT_READY",
+        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH",
+    ):
         return "startup_check"
 
     if flag.startswith("TRADING_SESSION_"):
@@ -1683,6 +1727,9 @@ def _print_artifact_summary(row: dict[str, Any]) -> None:
         "highest_severity",
         "outcome",
         "reason",
+        "reconcile_reason_code",
+        "reconcile_reason_message",
+        "reconcile_changed_rows",
         "session_outcome",
         "session_reason",
         "stop_reason",

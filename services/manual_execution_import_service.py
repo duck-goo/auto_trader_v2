@@ -11,6 +11,13 @@ import pytz
 
 from logger import get_logger
 from services.errors import ServiceError
+from services.timing2_30s_trigger_service import (
+    STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+    STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+)
+from services.timing2_intraday_trigger_service import (
+    STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER,
+)
 from services.timing2_lot_exit_scan_service import (
     STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK,
     STRATEGY_NAME_TIMING2_LOT_STOP_LOSS,
@@ -35,6 +42,11 @@ _LOT_LEVEL_SELL_STRATEGIES = {
     STRATEGY_NAME_TIMING2_LOT_STOP_LOSS,
     STRATEGY_NAME_TIMING2_LOT_3M_MA_BREAK,
     STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
+}
+_TIMING2_BUY_STRATEGIES = {
+    STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER,
+    STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+    STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
 }
 
 
@@ -270,6 +282,14 @@ class ManualExecutionImportService:
                 ),
             )
 
+        buy_lot_block = self._validate_buy_lot_context(
+            item=item,
+            order_row=order_row,
+            local_filled_qty_before=existing_filled_qty,
+        )
+        if buy_lot_block is not None:
+            return buy_lot_block
+
         sell_lot_block = self._validate_sell_lot_context(
             item=item,
             order_row=order_row,
@@ -377,6 +397,30 @@ class ManualExecutionImportService:
                 )
 
         return updated_order
+
+    def _validate_buy_lot_context(
+        self,
+        *,
+        item: ManualExecutionImportItem,
+        order_row,
+        local_filled_qty_before: int,
+    ) -> ManualExecutionImportCandidate | None:
+        if not self._is_timing2_buy_order(order_row):
+            return None
+
+        if self._entry_lot_repo is not None:
+            return None
+
+        return self._build_blocked(
+            item=item,
+            order_row=order_row,
+            local_filled_qty_before=local_filled_qty_before,
+            reason_code="ENTRY_LOT_REPOSITORY_MISSING",
+            reason_message=(
+                "Timing2 buy execution import requires EntryLotRepository so "
+                "the actual filled quantity is persisted as a separate entry lot."
+            ),
+        )
 
     def _validate_sell_lot_context(
         self,
@@ -497,6 +541,13 @@ class ManualExecutionImportService:
         )
 
     @staticmethod
+    def _is_timing2_buy_order(order_row) -> bool:
+        return (
+            order_row.side == "buy"
+            and order_row.strategy_name in _TIMING2_BUY_STRATEGIES
+        )
+
+    @staticmethod
     def _project_status(*, order_row, projected_filled_qty: int) -> str:
         if order_row.status == DbOrderStatus.CANCELLED:
             return DbOrderStatus.CANCELLED.value
@@ -512,8 +563,14 @@ class ManualExecutionImportService:
             raise ValueError("kis_exec_no must be a non-empty string.")
         if isinstance(item.qty, bool) or not isinstance(item.qty, int) or item.qty <= 0:
             raise ValueError(f"qty must be a positive integer: {item.qty!r}")
-        if isinstance(item.price, bool) or not isinstance(item.price, int) or item.price < 0:
-            raise ValueError(f"price must be a non-negative integer: {item.price!r}")
+        if (
+            isinstance(item.price, bool)
+            or not isinstance(item.price, int)
+            or item.price <= 0
+        ):
+            raise ValueError(
+                f"price must be a positive integer actual execution price: {item.price!r}"
+            )
         try:
             parsed = datetime.fromisoformat(item.executed_at)
         except Exception as exc:

@@ -552,6 +552,7 @@ class SellSignalExecutionService:
         executed_at: str,
         settings: SellSignalExecutionSettings,
     ) -> None:
+        lot_audit_payload = self._build_lot_audit_payload(candidate)
         with transaction(self._conn):
             audit_row = self._signal_repo.record(
                 symbol=candidate.symbol,
@@ -578,10 +579,41 @@ class SellSignalExecutionService:
                     "order_error_message": execution_candidate.order_error_message,
                     "start_time": settings.start_time,
                     "cutoff_time": settings.cutoff_time,
+                    **lot_audit_payload,
                 },
             )
             self._signal_repo.mark_acted(audit_row.id)
             self._signal_repo.mark_acted(candidate.signal_id)
+
+    def _build_lot_audit_payload(
+        self,
+        candidate: SellTriggerSignalCandidate,
+    ) -> dict[str, object]:
+        if candidate.lot_id is None:
+            return {}
+
+        payload: dict[str, object] = {
+            "source_lot_remaining_qty_before": None,
+            "source_lot_realized_sell_qty_before": None,
+            "source_lot_status_before": None,
+        }
+        if self._entry_lot_repo is None:
+            return payload
+
+        lot = self._entry_lot_repo.get(candidate.lot_id)
+        if lot is None:
+            return payload
+        if lot.symbol != candidate.symbol:
+            raise ServiceError(
+                "Lot-level sell audit symbol mismatch: "
+                f"signal_symbol={candidate.symbol}, lot_symbol={lot.symbol}, "
+                f"lot_id={candidate.lot_id}"
+            )
+
+        payload["source_lot_remaining_qty_before"] = lot.remaining_qty
+        payload["source_lot_realized_sell_qty_before"] = lot.realized_sell_qty
+        payload["source_lot_status_before"] = lot.status
+        return payload
 
     def _load_current_price(self, symbol: str) -> int:
         try:

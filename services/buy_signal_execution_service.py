@@ -28,6 +28,7 @@ from services.timing2_30s_trigger_service import (
 )
 from storage.db import transaction
 from storage.repositories import (
+    EntryLotRepository,
     OrderRepository,
     PositionRepository,
     SignalRepository,
@@ -42,6 +43,18 @@ BUY_TRIGGER_STRATEGY_PRIORITIES = {
     STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER: 1,
     STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER: 1,
 }
+TIMING2_30S_ENTRY_STRATEGIES = frozenset(
+    {
+        STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+        STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+    }
+)
+TIMING2_30S_ENTRY_SLOTS = frozenset(
+    {
+        "timing2_morning",
+        "timing2_range",
+    }
+)
 
 _KST = pytz.timezone("Asia/Seoul")
 _log = get_logger("order")
@@ -184,6 +197,7 @@ class BuySignalExecutionService:
         position_repo: PositionRepository,
         order_service: OrderService,
         risk_guard_service: TradingRiskGuardService,
+        entry_lot_repo: EntryLotRepository | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._broker = broker
@@ -193,6 +207,7 @@ class BuySignalExecutionService:
         self._position_repo = position_repo
         self._order_service = order_service
         self._risk_guard_service = risk_guard_service
+        self._entry_lot_repo = entry_lot_repo
         self._now_fn = now_fn or _default_now
 
     def execute_pending_signals(
@@ -503,16 +518,9 @@ class BuySignalExecutionService:
                 False,
             )
 
-        if candidate.symbol in live_symbols:
-            return (
-                self._build_blocked_candidate(
-                    candidate=candidate,
-                    reason_code="LIVE_POSITION_EXISTS",
-                    reason_message="A live position already exists for this symbol.",
-                ),
-                0,
-                False,
-            )
+        live_position_block = self._resolve_live_position_block(candidate, live_symbols)
+        if live_position_block is not None:
+            return live_position_block
 
         if candidate.symbol in unresolved_buy_symbols:
             return (
@@ -525,7 +533,8 @@ class BuySignalExecutionService:
                 False,
             )
 
-        if len(active_symbols) >= settings.max_holdings:
+        would_add_new_symbol = candidate.symbol not in active_symbols
+        if would_add_new_symbol and len(active_symbols) >= settings.max_holdings:
             return (
                 self._build_blocked_candidate(
                     candidate=candidate,
@@ -654,6 +663,78 @@ class BuySignalExecutionService:
             reserve_after_order,
             reserve_order_slot,
         )
+
+    def _resolve_live_position_block(
+        self,
+        candidate: BuyTriggerSignalCandidate,
+        live_symbols: set[str],
+    ) -> tuple[BuySignalExecutionCandidate, int, bool] | None:
+        if candidate.symbol not in live_symbols:
+            return None
+
+        if candidate.source_strategy_name not in TIMING2_30S_ENTRY_STRATEGIES:
+            return (
+                self._build_blocked_candidate(
+                    candidate=candidate,
+                    reason_code="LIVE_POSITION_EXISTS",
+                    reason_message="A live position already exists for this symbol.",
+                ),
+                0,
+                False,
+            )
+
+        if self._entry_lot_repo is None:
+            return (
+                self._build_blocked_candidate(
+                    candidate=candidate,
+                    reason_code="ENTRY_LOT_REPOSITORY_REQUIRED",
+                    reason_message=(
+                        "Timing2 second-slot entries require entry lot storage "
+                        "to verify which slot is already open."
+                    ),
+                ),
+                0,
+                False,
+            )
+
+        open_lots = self._entry_lot_repo.list_open_by_symbol(symbol=candidate.symbol)
+        target_slot = EntryLotRepository.infer_entry_slot(
+            candidate.source_strategy_name
+        )
+        open_timing2_slots = {
+            lot.entry_slot
+            for lot in open_lots
+            if lot.entry_slot in TIMING2_30S_ENTRY_SLOTS
+        }
+        if target_slot in open_timing2_slots:
+            return (
+                self._build_blocked_candidate(
+                    candidate=candidate,
+                    reason_code="TIMING2_ENTRY_SLOT_ALREADY_USED",
+                    reason_message=(
+                        "Timing2 entry slot is already open for this symbol: "
+                        f"entry_slot={target_slot}"
+                    ),
+                ),
+                0,
+                False,
+            )
+
+        if not open_timing2_slots:
+            return (
+                self._build_blocked_candidate(
+                    candidate=candidate,
+                    reason_code="LIVE_POSITION_WITHOUT_TIMING2_LOT",
+                    reason_message=(
+                        "A live position exists, but no open Timing2 lot was "
+                        "found. Additional Timing2 entry is blocked for safety."
+                    ),
+                ),
+                0,
+                False,
+            )
+
+        return None
 
     def _persist_consumed_signal(
         self,

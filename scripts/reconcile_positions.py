@@ -7,6 +7,7 @@ Purpose:
 
 Safety:
     - default: block when unresolved orders exist
+    - block when a position diff would touch a symbol with an open entry lot
     - broker API is called outside DB transaction
     - only positions are changed
 """
@@ -29,7 +30,7 @@ from logger import setup_logging
 from services import ReconcileOutcome, ReconcileService
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
-from storage.repositories import OrderRepository, PositionRepository
+from storage.repositories import EntryLotRepository, OrderRepository, PositionRepository
 
 
 def _section(title: str) -> None:
@@ -182,6 +183,7 @@ def main() -> int:
                 conn=conn,
                 order_repo=order_repo,
                 position_repo=position_repo,
+                entry_lot_repo=EntryLotRepository(conn),
             )
             result = service.reconcile_positions(
                 allow_unresolved_orders=args.allow_unresolved_orders
@@ -196,7 +198,8 @@ def main() -> int:
         if result.outcome == ReconcileOutcome.BLOCKED:
             _warn(
                 "blocked",
-                "Unresolved orders exist, so reconciliation did not run.",
+                result.reason_message
+                or "Position reconciliation was blocked.",
             )
 
         if result.unresolved_orders:
@@ -240,6 +243,8 @@ def main() -> int:
                     "outcome": result.outcome.value,
                     "changed_rows": result.changed_rows,
                     "reconciled_at": result.reconciled_at,
+                    "reason_code": result.reason_code,
+                    "reason_message": result.reason_message,
                     "diffs": _diffs_to_dicts(result.diffs),
                     "unresolved_orders": _unresolved_orders_to_dicts(
                         result.unresolved_orders

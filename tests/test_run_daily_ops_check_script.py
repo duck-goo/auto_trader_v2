@@ -112,6 +112,11 @@ def test_main_runs_report_then_notification_and_returns_ready(
     payload = json.loads((ops_dir / "daily_ops_check.json").read_text(encoding="utf-8"))
     assert payload["overall_outcome"] == "READY"
     assert payload["overall_reason"] is None
+    assert payload["operator_summary"]["headline"] == (
+        "Daily ops looks ready across 5 artifacts."
+    )
+    assert payload["operator_summary"]["detail"] == "No attention flags detected."
+    assert payload["operator_summary"]["startup_open_entry_lot_position_mismatch"] is False
     assert [step["name"] for step in payload["steps"]] == [
         "Build Daily Ops Report",
         "Prepare Daily Ops Notification",
@@ -513,3 +518,112 @@ def test_main_returns_notification_required_for_direct_sell_failure_attention(
     assert payload["steps"][1]["result"]["top_action_codes"] == [
         "REVIEW_SELL_EXECUTION_FAILURE"
     ]
+
+
+def test_main_builds_operator_summary_for_startup_open_entry_lot_mismatch(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_daily_ops_check_startup_mismatch"
+    )
+    _set_cli_args(monkeypatch, ops_dir=ops_dir)
+
+    commands: list[list[str]] = []
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "show_daily_ops_report.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "report_outcome": "ATTENTION",
+                    "health_outcome": "WARNING",
+                    "highest_severity": "WARNING",
+                    "artifact_count": 1,
+                    "attention_flags": [
+                        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"
+                    ],
+                    "action_items": [
+                        {
+                            "action_code": "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"
+                        }
+                    ],
+                    "alert": {
+                        "title": f"[WARNING] Daily ops {TRADE_DATE}",
+                        "summary": "Startup blocked by open entry lot position mismatch.",
+                        "lines": [
+                            "Affected symbols: 005930",
+                            "Review executions and lot state before rerunning startup.",
+                        ],
+                        "text": (
+                            f"[WARNING] Daily ops {TRADE_DATE}\n"
+                            "Startup blocked by open entry lot position mismatch.\n"
+                            "Affected symbols: 005930\n"
+                            "Review executions and lot state before rerunning startup."
+                        ),
+                    },
+                },
+            )
+            return 0
+        if script_name == "prepare_daily_ops_notification.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "health_outcome": "WARNING",
+                    "should_notify": True,
+                    "notification_reason": (
+                        "health_outcome=WARNING meets min_level=WARNING"
+                    ),
+                    "summary": "Startup blocked by open entry lot position mismatch.",
+                    "lines": [
+                        "Affected symbols: 005930",
+                        "Review executions and lot state before rerunning startup.",
+                    ],
+                    "primary_attention_flag": (
+                        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"
+                    ),
+                    "primary_action_code": (
+                        "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"
+                    ),
+                    "startup_context": {
+                        "available": True,
+                        "outcome": "BLOCKED",
+                        "reconcile_reason_code": "OPEN_ENTRY_LOT_POSITION_MISMATCH",
+                        "reconcile_reason_message": (
+                            "Reconciliation would change positions for symbols "
+                            "that still have open entry lots. Review executions "
+                            "first: 005930"
+                        ),
+                        "open_entry_lot_position_mismatch": True,
+                    },
+                },
+            )
+            return 4
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads((ops_dir / "daily_ops_check.json").read_text(encoding="utf-8"))
+    assert payload["overall_outcome"] == "NOTIFICATION_REQUIRED"
+    assert payload["operator_summary"]["headline"] == (
+        "Startup blocked by open entry lot position mismatch."
+    )
+    assert payload["operator_summary"]["detail"] == (
+        "Affected symbols: 005930 | "
+        "Review executions and lot state before rerunning startup."
+    )
+    assert payload["operator_summary"]["primary_attention_flag"] == (
+        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    )
+    assert payload["operator_summary"]["primary_action_code"] == (
+        "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"
+    )
+    assert payload["operator_summary"]["startup_open_entry_lot_position_mismatch"] is True
+    assert payload["operator_summary"]["affected_symbols"] == "005930"

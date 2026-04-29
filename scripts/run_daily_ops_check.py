@@ -205,6 +205,17 @@ def _optional_text(value: Any) -> str | None:
     return text
 
 
+def _coerce_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    rows: list[str] = []
+    for item in value:
+        text = _optional_text(item)
+        if text is not None:
+            rows.append(text)
+    return rows
+
+
 def _run_child(command: list[str]) -> int:
     completed = subprocess.run(
         command,
@@ -347,6 +358,164 @@ def _dispatch_step_outcome(
     return "FAILED", reason or f"Unexpected dispatch result: exit_code={exit_code}, outcome={outcome}"
 
 
+def _extract_symbol_hint_from_startup_context(startup_context: dict[str, Any]) -> str | None:
+    attention_lines = _coerce_string_list(startup_context.get("attention_flags"))
+    for line in attention_lines:
+        if line.startswith("Affected symbols:"):
+            return line.partition(":")[2].strip() or None
+
+    marker = "Review executions first:"
+    for key in ("reconcile_reason_message", "reason"):
+        text = _optional_text(startup_context.get(key))
+        if text is None:
+            continue
+        marker_index = text.find(marker)
+        if marker_index < 0:
+            continue
+        suffix = text[marker_index + len(marker) :].strip().rstrip(".")
+        if suffix:
+            return suffix
+    return None
+
+
+def _build_operator_summary(
+    *,
+    overall_outcome: str,
+    overall_reason: str | None,
+    report_payload: dict[str, Any] | None,
+    notification_payload: dict[str, Any] | None,
+    dispatch_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    report_alert = (
+        report_payload.get("alert")
+        if isinstance(report_payload, dict)
+        and isinstance(report_payload.get("alert"), dict)
+        else {}
+    )
+    notification_summary = (
+        None
+        if not isinstance(notification_payload, dict)
+        else _optional_text(notification_payload.get("summary"))
+    )
+    notification_lines = (
+        []
+        if not isinstance(notification_payload, dict)
+        else _coerce_string_list(notification_payload.get("lines"))
+    )
+    report_summary = _optional_text(report_alert.get("summary"))
+    report_lines = _coerce_string_list(report_alert.get("lines"))
+    summary_text = notification_summary or report_summary
+    detail_lines = notification_lines or report_lines
+    startup_context = (
+        notification_payload.get("startup_context")
+        if isinstance(notification_payload, dict)
+        and isinstance(notification_payload.get("startup_context"), dict)
+        else {}
+    )
+    primary_attention_flag = (
+        None
+        if not isinstance(notification_payload, dict)
+        else _optional_text(notification_payload.get("primary_attention_flag"))
+    )
+    primary_action_code = (
+        None
+        if not isinstance(notification_payload, dict)
+        else _optional_text(notification_payload.get("primary_action_code"))
+    )
+    dispatch_outcome = (
+        None
+        if not isinstance(dispatch_payload, dict)
+        else _optional_text(dispatch_payload.get("outcome"))
+    )
+
+    if startup_context.get("open_entry_lot_position_mismatch") is True:
+        affected_symbols = _extract_symbol_hint_from_startup_context(startup_context)
+        headline = (
+            summary_text or "Startup blocked by open entry lot position mismatch."
+        )
+        detail_rows = list(detail_lines)
+        if not detail_rows:
+            if affected_symbols is not None:
+                detail_rows.append(f"Affected symbols: {affected_symbols}")
+            reason_message = _optional_text(
+                startup_context.get("reconcile_reason_message")
+            )
+            if reason_message is not None:
+                detail_rows.append(reason_message)
+        detail = " | ".join(detail_rows) if detail_rows else overall_reason
+        return {
+            "headline": headline,
+            "detail": detail,
+            "overall_outcome": overall_outcome,
+            "overall_reason": overall_reason,
+            "health_outcome": (
+                None
+                if not isinstance(notification_payload, dict)
+                else notification_payload.get("health_outcome")
+            ),
+            "should_notify": (
+                None
+                if not isinstance(notification_payload, dict)
+                else notification_payload.get("should_notify")
+            ),
+            "dispatch_outcome": dispatch_outcome,
+            "primary_attention_flag": primary_attention_flag,
+            "primary_action_code": primary_action_code,
+            "startup_open_entry_lot_position_mismatch": True,
+            "affected_symbols": affected_symbols,
+        }
+
+    if summary_text is not None:
+        detail = None if not detail_lines else detail_lines[0]
+        return {
+            "headline": summary_text,
+            "detail": detail,
+            "overall_outcome": overall_outcome,
+            "overall_reason": overall_reason,
+            "health_outcome": (
+                None
+                if not isinstance(notification_payload, dict)
+                else notification_payload.get("health_outcome")
+            ),
+            "should_notify": (
+                None
+                if not isinstance(notification_payload, dict)
+                else notification_payload.get("should_notify")
+            ),
+            "dispatch_outcome": dispatch_outcome,
+            "primary_attention_flag": primary_attention_flag,
+            "primary_action_code": primary_action_code,
+            "startup_open_entry_lot_position_mismatch": False,
+            "affected_symbols": None,
+        }
+
+    if overall_outcome == "READY":
+        headline = "Daily ops check is ready."
+    else:
+        headline = "Daily ops check requires review."
+    return {
+        "headline": headline,
+        "detail": overall_reason,
+        "overall_outcome": overall_outcome,
+        "overall_reason": overall_reason,
+        "health_outcome": (
+            None
+            if not isinstance(notification_payload, dict)
+            else notification_payload.get("health_outcome")
+        ),
+        "should_notify": (
+            None
+            if not isinstance(notification_payload, dict)
+            else notification_payload.get("should_notify")
+        ),
+        "dispatch_outcome": dispatch_outcome,
+        "primary_attention_flag": primary_attention_flag,
+        "primary_action_code": primary_action_code,
+        "startup_open_entry_lot_position_mismatch": False,
+        "affected_symbols": None,
+    }
+
+
 def main() -> int:
     args = _parse_args()
 
@@ -360,6 +529,8 @@ def main() -> int:
 
     started_at = datetime.now(KST)
     steps: list[dict[str, Any]] = []
+    notification_payload: dict[str, Any] | None = None
+    dispatch_payload: dict[str, Any] | None = None
 
     _section("Run Daily Ops Check")
     _ok("trade_date", args.trade_date)
@@ -482,6 +653,13 @@ def main() -> int:
             overall_outcome = "READY"
             overall_reason = None
 
+    operator_summary = _build_operator_summary(
+        overall_outcome=overall_outcome,
+        overall_reason=overall_reason,
+        report_payload=report_payload,
+        notification_payload=notification_payload,
+        dispatch_payload=dispatch_payload,
+    )
     payload = {
         "trade_date": args.trade_date,
         "started_at": started_at.isoformat(),
@@ -492,6 +670,7 @@ def main() -> int:
         "output_paths": {key: str(value) for key, value in output_paths.items()},
         "overall_outcome": overall_outcome,
         "overall_reason": overall_reason,
+        "operator_summary": operator_summary,
         "steps": steps,
     }
     _save_json(output_paths["summary_output"], payload)
@@ -500,6 +679,10 @@ def main() -> int:
     _ok("overall_outcome", overall_outcome)
     if overall_reason:
         _warn("overall_reason", overall_reason)
+    _ok("operator_headline", str(operator_summary.get("headline")))
+    operator_detail = _optional_text(operator_summary.get("detail"))
+    if operator_detail is not None:
+        _warn("operator_detail", operator_detail)
     _ok("json_saved", str(output_paths["summary_output"]))
 
     if overall_outcome in ("READY", "NOTIFICATION_DUPLICATE_SKIPPED"):

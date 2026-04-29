@@ -37,9 +37,11 @@ from services import (
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    EntryLotRepository,
     ExecutionRepository,
     OrderRepository,
     PositionRepository,
+    SignalRepository,
 )
 
 KST = pytz.timezone("Asia/Seoul")
@@ -218,6 +220,8 @@ def main() -> int:
                 order_repo=order_repo,
                 execution_repo=execution_repo,
                 sync_service=sync_service,
+                entry_lot_repo=EntryLotRepository(conn),
+                signal_repo=SignalRepository(conn),
             )
             review_service = ManualExecutionRecoveryReviewService(
                 order_repo=order_repo,

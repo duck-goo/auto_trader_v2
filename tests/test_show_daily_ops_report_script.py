@@ -451,6 +451,77 @@ def test_main_warns_when_timing2_rehearsal_did_not_verify_30s_pipeline(
     ]
 
 
+def test_main_marks_open_entry_lot_startup_block_with_specific_flag(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_daily_ops_startup_block")
+    output_path = ops_dir / "daily_ops_report.json"
+
+    _write_json(
+        ops_dir / "startup_check.json",
+        {
+            "trade_date": "2026-04-20",
+            "checked_at": "2026-04-20T08:59:00+09:00",
+            "outcome": "BLOCKED",
+            "reason": "Startup is blocked because reconcile found an open entry lot mismatch.",
+            "reconcile_reason_code": "OPEN_ENTRY_LOT_POSITION_MISMATCH",
+            "reconcile_reason_message": (
+                "Reconciliation would change positions for symbols that still have "
+                "open entry lots. Review executions first: 005930"
+            ),
+            "reconcile_changed_rows": 1,
+            "universe_snapshot": {
+                "exists": True,
+                "candidate_count": 12,
+                "refreshed_at": "2026-04-20T08:30:00+09:00",
+            },
+            "unresolved_orders": [],
+            "live_positions": [
+                {
+                    "symbol": "005930",
+                    "qty": 2,
+                    "avg_price": 71000,
+                    "updated_at": "2026-04-20T08:58:00+09:00",
+                }
+            ],
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    flag = "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    assert payload["health_outcome"] == "WARNING"
+    assert flag in payload["attention_flags"]
+    assert payload["artifacts"]["startup_check"]["reconcile_reason_code"] == (
+        "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    )
+    assert payload["artifacts"]["startup_check"]["reconcile_changed_rows"] == 1
+    assert payload["artifacts"]["startup_check"]["status_level"] == "WARNING"
+    assert payload["artifacts"]["startup_check"]["attention_flags"] == [flag]
+    flag_details = {row["flag"]: row for row in payload["flag_details"]}
+    assert flag_details[flag]["severity"] == "WARNING"
+    assert flag_details[flag]["message"].endswith("005930")
+    action_items = {row["flag"]: row for row in payload["action_items"]}
+    assert (
+        action_items[flag]["action_code"]
+        == "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"
+    )
+    assert action_items[flag]["reference_path"].endswith("startup_check.json")
+
+
 def test_main_warns_when_trading_session_timing2_setup_is_not_ready(
     test_db_path,
     monkeypatch,

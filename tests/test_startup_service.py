@@ -13,6 +13,8 @@ from services import StartupOutcome, StartupService
 from storage.db import get_connection, transaction
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
+    EntryLotRepository,
+    ExecutionRepository,
     OrderRepository,
     PositionRepository,
     UniverseCandidate,
@@ -103,6 +105,48 @@ def _seed_unresolved_order(conn, order_repo):
             client_order_id="COID_STARTUP_BLOCK",
             kis_order_no="KIS_STARTUP_001",
             submitted_at="2026-04-14T09:00:01+09:00",
+        )
+
+
+def _seed_open_entry_lot(conn, order_repo, *, symbol="005930"):
+    entry_lot_repo = EntryLotRepository(conn)
+    execution_repo = ExecutionRepository(conn)
+    with transaction(conn):
+        order = order_repo.create(
+            client_order_id=f"COID_STARTUP_LOT_{symbol}",
+            symbol=symbol,
+            side="buy",
+            qty=1,
+            price=0,
+            order_type="MARKET",
+            strategy_name="buy_timing2_30s_morning_open_reclaim",
+            requested_at="2026-04-14T09:10:00+09:00",
+        )
+        order_repo.mark_submitted(
+            client_order_id=order.client_order_id,
+            kis_order_no=f"KIS_STARTUP_LOT_{symbol}",
+            submitted_at="2026-04-14T09:10:01+09:00",
+        )
+        assert execution_repo.insert_if_new(
+            order_id=order.id,
+            kis_exec_no=f"EXEC_STARTUP_LOT_{symbol}",
+            symbol=symbol,
+            side="buy",
+            qty=1,
+            price=70_000,
+            executed_at="2026-04-14T09:11:00+09:00",
+        ) is True
+        order_repo.sync_execution_summary(
+            client_order_id=order.client_order_id,
+            closed_at="2026-04-14T09:11:00+09:00",
+        )
+        entry_lot_repo.apply_buy_execution(
+            entry_order_id=order.id,
+            symbol=symbol,
+            qty=1,
+            price=70_000,
+            executed_at="2026-04-14T09:11:00+09:00",
+            entry_strategy_name="buy_timing2_30s_morning_open_reclaim",
         )
 
 
@@ -212,3 +256,32 @@ def test_startup_check_allows_override(conn, repos):
     assert len(result.reconcile_result.unresolved_orders) == 1
     assert result.reconcile_result.changed_rows == 1
     broker.get_balance.assert_called_once()
+
+
+def test_startup_check_blocks_when_open_entry_lot_position_would_change(conn, repos):
+    order_repo, position_repo, universe_repo = repos
+    _seed_universe_snapshot(conn, universe_repo)
+    with transaction(conn):
+        position_repo.upsert_from_broker(
+            symbol="005930",
+            qty=1,
+            avg_price=70_000,
+            updated_at="2026-04-14T09:20:00+09:00",
+        )
+    _seed_open_entry_lot(conn, order_repo, symbol="005930")
+
+    broker = MagicMock()
+    broker.get_balance.return_value = _balance(
+        _holding(code="005930", qty=2, avg_price=70500.0)
+    )
+
+    service = _make_service(conn, repos, broker)
+    result = service.run_startup_check()
+
+    assert result.outcome == StartupOutcome.BLOCKED
+    assert result.reconcile_result is not None
+    assert (
+        result.reconcile_result.reason_code
+        == "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    )
+    assert "005930" in (result.reason or "")

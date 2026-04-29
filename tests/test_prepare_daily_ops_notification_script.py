@@ -71,7 +71,10 @@ def test_main_writes_payload_and_text_without_notification_for_ready_report(
     assert payload["should_notify"] is False
     assert payload["notification_reason"] == "health_outcome=READY is below min_level=WARNING"
     assert payload["title"] == "[READY] Daily ops 2026-04-20"
+    assert payload["primary_attention_flag"] is None
+    assert payload["primary_action_code"] is None
     assert payload["top_action_codes"] == []
+    assert payload["startup_context"]["available"] is False
     text = text_path.read_text(encoding="utf-8")
     assert "[READY] Daily ops 2026-04-20" in text
     assert "No attention flags detected." in text
@@ -136,6 +139,8 @@ def test_main_returns_4_for_critical_report_and_keeps_top_action_codes(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["should_notify"] is True
     assert payload["notification_reason"] == "health_outcome=CRITICAL meets min_level=WARNING"
+    assert payload["primary_attention_flag"] == "KILL_SWITCH_ENABLED"
+    assert payload["primary_action_code"] == "REVIEW_KILL_SWITCH"
     assert payload["top_action_codes"] == [
         "REVIEW_KILL_SWITCH",
         "REVIEW_EXECUTION_RECOVERY",
@@ -301,3 +306,108 @@ def test_main_returns_4_for_direct_sell_failure_critical_report(
     )
     assert payload["top_action_codes"] == ["REVIEW_SELL_EXECUTION_FAILURE"]
     assert payload["summary"] == "Direct sell execution failed and needs manual review."
+
+
+def test_main_includes_structured_startup_context_for_open_entry_lot_block(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_notify_startup_block")
+    report_path = ops_dir / "daily_ops_report.json"
+    output_path = ops_dir / "daily_ops_notification.json"
+
+    _write_json(
+        report_path,
+        {
+            "trade_date": "2026-04-20",
+            "artifact_count": 1,
+            "report_outcome": "ATTENTION",
+            "health_outcome": "WARNING",
+            "highest_severity": "WARNING",
+            "attention_flags": [
+                "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH",
+            ],
+            "action_items": [
+                {
+                    "action_code": "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK",
+                    "severity": "WARNING",
+                },
+            ],
+            "alert": {
+                "level": "WARNING",
+                "title": "[WARNING] Daily ops 2026-04-20",
+                "summary": "Startup reconcile block requires review.",
+                "lines": [
+                    "Review executions first: 005930",
+                ],
+                "text": (
+                    "[WARNING] Daily ops 2026-04-20\n"
+                    "Startup reconcile block requires review.\n"
+                    "Review executions first: 005930"
+                ),
+            },
+            "artifacts": {
+                "startup_check": {
+                    "exists": True,
+                    "status_level": "WARNING",
+                    "highest_severity": "WARNING",
+                    "outcome": "BLOCKED",
+                    "reason": (
+                        "Reconciliation would change positions for symbols that "
+                        "still have open entry lots."
+                    ),
+                    "checked_at": "2026-04-20T08:59:00+09:00",
+                    "reconcile_reason_code": "OPEN_ENTRY_LOT_POSITION_MISMATCH",
+                    "reconcile_reason_message": (
+                        "Reconciliation would change positions for symbols that "
+                        "still have open entry lots. Review executions first: 005930"
+                    ),
+                    "reconcile_changed_rows": 1,
+                    "unresolved_order_count": 0,
+                    "live_position_count": 1,
+                    "attention_flags": [
+                        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH",
+                    ],
+                }
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(report_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["primary_attention_flag"] == (
+        "STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    )
+    assert payload["primary_action_code"] == "REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"
+    assert payload["summary"] == "Startup blocked by open entry lot position mismatch."
+    assert payload["lines"] == [
+        "Affected symbols: 005930",
+        "Review executions and lot state before rerunning startup.",
+    ]
+    assert payload["text"] == (
+        "[WARNING] Daily ops 2026-04-20\n"
+        "Startup blocked by open entry lot position mismatch.\n"
+        "Affected symbols: 005930\n"
+        "Review executions and lot state before rerunning startup."
+    )
+    assert payload["startup_context"]["available"] is True
+    assert payload["startup_context"]["outcome"] == "BLOCKED"
+    assert payload["startup_context"]["reconcile_reason_code"] == (
+        "OPEN_ENTRY_LOT_POSITION_MISMATCH"
+    )
+    assert payload["startup_context"]["reconcile_reason_message"].endswith("005930")
+    assert payload["startup_context"]["reconcile_changed_rows"] == 1
+    assert payload["startup_context"]["live_position_count"] == 1
+    assert payload["startup_context"]["open_entry_lot_position_mismatch"] is True

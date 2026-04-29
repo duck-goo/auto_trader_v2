@@ -14,7 +14,12 @@ from broker.base import BrokerInterface
 from logger import get_logger
 from services.errors import ServiceError
 from storage.db import transaction
-from storage.repositories import OrderRepository, OrderRow, PositionRepository
+from storage.repositories import (
+    EntryLotRepository,
+    OrderRepository,
+    OrderRow,
+    PositionRepository,
+)
 
 
 _log = get_logger("system")
@@ -48,6 +53,8 @@ class ReconcileResult:
     changed_rows: int
     diffs: tuple[PositionDiff, ...]
     unresolved_orders: tuple[OrderRow, ...]
+    reason_code: str | None
+    reason_message: str | None
 
 
 def _default_now() -> datetime:
@@ -64,12 +71,14 @@ class ReconcileService:
         conn: sqlite3.Connection,
         order_repo: OrderRepository,
         position_repo: PositionRepository,
+        entry_lot_repo: EntryLotRepository | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._broker = broker
         self._conn = conn
         self._order_repo = order_repo
         self._position_repo = position_repo
+        self._entry_lot_repo = entry_lot_repo
         self._now_fn = now_fn or _default_now
 
     def reconcile_positions(
@@ -82,6 +91,8 @@ class ReconcileService:
 
         Safety policy:
             - By default, block reconciliation if unresolved orders exist.
+            - Block if reconciliation would change a symbol that still has an
+              open entry lot, because this service does not rewrite lot state.
             - Broker API is called outside any DB transaction.
             - Only positions are changed here; orders/executions are untouched.
         """
@@ -99,6 +110,10 @@ class ReconcileService:
                 changed_rows=0,
                 diffs=(),
                 unresolved_orders=unresolved_orders,
+                reason_code="UNRESOLVED_ORDERS_EXIST",
+                reason_message=(
+                    "Unresolved orders exist, so reconciliation did not run."
+                ),
             )
 
         # Must stay outside a DB transaction.
@@ -109,6 +124,26 @@ class ReconcileService:
             row.symbol: row for row in self._position_repo.list_all_including_zero()
         }
         diffs = self._compute_diffs(local_rows, broker_map)
+        blocked_symbols = self._find_open_entry_lot_conflict_symbols(diffs)
+        if blocked_symbols:
+            blocked_symbol_text = ", ".join(blocked_symbols)
+            _log.warning(
+                "[reconcile_positions:blocked_open_entry_lot_conflict] "
+                f"symbol_count={len(blocked_symbols)} symbols={blocked_symbol_text}"
+            )
+            return ReconcileResult(
+                outcome=ReconcileOutcome.BLOCKED,
+                reconciled_at=reconciled_at,
+                changed_rows=0,
+                diffs=(),
+                unresolved_orders=unresolved_orders,
+                reason_code="OPEN_ENTRY_LOT_POSITION_MISMATCH",
+                reason_message=(
+                    "Reconciliation would change positions for symbols that still "
+                    "have open entry lots. Review executions first: "
+                    f"{blocked_symbol_text}"
+                ),
+            )
 
         if diffs:
             with transaction(self._conn):
@@ -137,7 +172,23 @@ class ReconcileService:
             changed_rows=len(diffs),
             diffs=diffs,
             unresolved_orders=unresolved_orders,
+            reason_code=None,
+            reason_message=None,
         )
+
+    def _find_open_entry_lot_conflict_symbols(
+        self,
+        diffs: tuple[PositionDiff, ...],
+    ) -> tuple[str, ...]:
+        if self._entry_lot_repo is None or not diffs:
+            return ()
+
+        blocked_symbols: list[str] = []
+        for diff in diffs:
+            lots = self._entry_lot_repo.list_by_symbol(symbol=diff.symbol)
+            if any(lot.status == "OPEN" for lot in lots):
+                blocked_symbols.append(diff.symbol)
+        return tuple(blocked_symbols)
 
     def _build_broker_position_map(
         self,

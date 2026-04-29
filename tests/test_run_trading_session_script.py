@@ -77,6 +77,29 @@ def _install_fixed_tempdir(monkeypatch, *, test_db_path: Path, suffix: str) -> N
     )
 
 
+def _install_isolated_project_root(monkeypatch, *, test_db_path: Path) -> Path:
+    project_root = test_db_path.with_name(f"{test_db_path.stem}_project")
+    project_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(target, "PROJECT_ROOT", project_root)
+    return project_root
+
+
+def _write_buy_strategy_selection(project_root: Path, buy_strategy: object) -> Path:
+    selection_path = (
+        project_root
+        / "data"
+        / "ops"
+        / TRADE_DATE
+        / target.BUY_STRATEGY_SELECTION_FILE
+    )
+    selection_path.parent.mkdir(parents=True, exist_ok=True)
+    selection_path.write_text(
+        json.dumps({"buy_strategy": buy_strategy}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return selection_path
+
+
 def test_main_execute_success_runs_preopen_then_polling_and_passes_risk_flags(
     test_db_path,
     monkeypatch,
@@ -394,8 +417,175 @@ def test_main_forwards_buy_strategy_to_polling_and_payload(
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["buy_strategy"] == "timing2"
+    assert payload["buy_strategy_source"] == target.BUY_STRATEGY_SOURCE_CLI
     assert payload["run_timing1"] is False
     assert payload["run_timing2"] is True
+
+
+def test_main_uses_saved_buy_strategy_when_cli_strategy_is_absent(
+    test_db_path,
+    monkeypatch,
+):
+    project_root = _install_isolated_project_root(
+        monkeypatch,
+        test_db_path=test_db_path,
+    )
+    selection_path = _write_buy_strategy_selection(project_root, "timing2")
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_saved_buy_strategy.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=[
+            "--preopen-scan-timing2-setup",
+            "--preopen-write-timing2-signals",
+        ],
+    )
+
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(target, "load_settings", lambda: _make_settings(test_db_path))
+    monkeypatch.setattr(target, "setup_logging", lambda settings: None)
+    _install_fixed_tempdir(
+        monkeypatch,
+        test_db_path=test_db_path,
+        suffix="session_temp_saved_buy_strategy",
+    )
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "prepare_preopen_universe.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "readiness_outcome": "READY",
+                    "readiness_reason": None,
+                },
+            )
+            return 0
+        if script_name == "run_intraday_trading_polling.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "stop_reason": "MAX_CYCLES_REACHED",
+                },
+            )
+            return 0
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    polling_command = commands[1]
+    assert "--buy-strategy" in polling_command
+    assert polling_command[polling_command.index("--buy-strategy") + 1] == "timing2"
+    assert "--scan-timing1" not in polling_command
+    assert "--scan-timing2" not in polling_command
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["buy_strategy"] == "timing2"
+    assert payload["buy_strategy_source"] == target.BUY_STRATEGY_SOURCE_SELECTION_FILE
+    assert payload["buy_strategy_selection_path"] == str(selection_path.resolve())
+    assert payload["run_timing1"] is False
+    assert payload["run_timing2"] is True
+
+
+def test_main_prefers_explicit_buy_strategy_over_saved_selection(
+    test_db_path,
+    monkeypatch,
+):
+    project_root = _install_isolated_project_root(
+        monkeypatch,
+        test_db_path=test_db_path,
+    )
+    _write_buy_strategy_selection(project_root, "timing1")
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_cli_over_saved_strategy.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=[
+            "--preopen-scan-timing2-setup",
+            "--preopen-write-timing2-signals",
+            "--buy-strategy",
+            "timing2",
+        ],
+    )
+
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(target, "load_settings", lambda: _make_settings(test_db_path))
+    monkeypatch.setattr(target, "setup_logging", lambda settings: None)
+    _install_fixed_tempdir(
+        monkeypatch,
+        test_db_path=test_db_path,
+        suffix="session_temp_cli_over_saved_strategy",
+    )
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "prepare_preopen_universe.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "readiness_outcome": "READY",
+                    "readiness_reason": None,
+                },
+            )
+            return 0
+        if script_name == "run_intraday_trading_polling.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "stop_reason": "MAX_CYCLES_REACHED",
+                },
+            )
+            return 0
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    polling_command = commands[1]
+    assert "--buy-strategy" in polling_command
+    assert polling_command[polling_command.index("--buy-strategy") + 1] == "timing2"
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["buy_strategy"] == "timing2"
+    assert payload["buy_strategy_source"] == target.BUY_STRATEGY_SOURCE_CLI
+    assert payload["buy_strategy_selection_path"] is None
+
+
+def test_main_rejects_invalid_saved_buy_strategy(
+    test_db_path,
+    monkeypatch,
+):
+    project_root = _install_isolated_project_root(
+        monkeypatch,
+        test_db_path=test_db_path,
+    )
+    _write_buy_strategy_selection(project_root, "invalid")
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_invalid_saved_buy_strategy.json"
+    )
+    _set_cli_args(monkeypatch, output_path=output_path)
+
+    exit_code = target.main()
+
+    assert exit_code == 5
+    assert not output_path.exists()
 
 
 def test_main_rejects_explicit_timing2_without_preopen_setup_signals(

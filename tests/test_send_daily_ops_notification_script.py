@@ -147,3 +147,70 @@ def test_main_skips_duplicate_dispatch_without_force(
     assert payload["reason"] == "An identical notification was already dispatched."
     assert payload["previous_outcome"] == "DISPATCHED"
     assert payload["previous_dispatched_at"] == "2026-04-21T18:00:00+09:00"
+
+
+def test_main_dispatches_again_when_text_changed_even_if_summary_matches(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(f"{test_db_path.stem}_send_notify_text_changed")
+    notification_path = ops_dir / "daily_ops_notification.json"
+    record_path = ops_dir / "daily_ops_dispatch.json"
+    dispatch_text_path = ops_dir / "daily_ops_dispatched.txt"
+
+    previous_payload = {
+        "trade_date": TRADE_DATE,
+        "health_outcome": "WARNING",
+        "title": f"[WARNING] Daily ops {TRADE_DATE}",
+        "should_notify": True,
+        "summary": "Startup reconcile block requires review.",
+        "text": (
+            f"[WARNING] Daily ops {TRADE_DATE}\n"
+            "Startup reconcile block requires review.\n"
+            "Review executions first: 005930"
+        ),
+        "top_action_codes": ["REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"],
+    }
+    current_payload = {
+        "trade_date": TRADE_DATE,
+        "health_outcome": "WARNING",
+        "title": f"[WARNING] Daily ops {TRADE_DATE}",
+        "should_notify": True,
+        "summary": "Startup reconcile block requires review.",
+        "text": (
+            f"[WARNING] Daily ops {TRADE_DATE}\n"
+            "Startup reconcile block requires review.\n"
+            "Review executions first: 035420"
+        ),
+        "top_action_codes": ["REVIEW_OPEN_ENTRY_LOT_RECONCILE_BLOCK"],
+    }
+
+    _write_json(notification_path, current_payload)
+    _write_json(
+        record_path,
+        {
+            "dispatch_key": target._build_dispatch_key(previous_payload),
+            "dispatch_key_version": target.DISPATCH_KEY_VERSION,
+            "outcome": "DISPATCHED",
+            "dispatched_at": "2026-04-21T18:00:00+09:00",
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--input",
+            str(notification_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 4
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    assert payload["outcome"] == "DISPATCHED"
+    assert payload["reason"] == "Notification dispatch recorded."
+    assert payload["dispatch_key_version"] == target.DISPATCH_KEY_VERSION
+    assert payload["previous_outcome"] == "DISPATCHED"
+    text = dispatch_text_path.read_text(encoding="utf-8")
+    assert "Review executions first: 035420" in text

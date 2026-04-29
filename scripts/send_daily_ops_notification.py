@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 KST = pytz.timezone("Asia/Seoul")
+DISPATCH_KEY_VERSION = 2
 
 
 def _section(title: str) -> None:
@@ -169,10 +170,20 @@ def _coerce_string_list(value: Any) -> list[str]:
 def _build_dispatch_key(payload: dict[str, Any]) -> str:
     trade_date = _optional_text(payload.get("trade_date")) or "UNKNOWN"
     health_outcome = _optional_text(payload.get("health_outcome")) or "UNKNOWN"
+    title = _optional_text(payload.get("title")) or ""
     summary = _optional_text(payload.get("summary")) or ""
+    text = _optional_text(payload.get("text")) or ""
     top_action_codes = _coerce_string_list(payload.get("top_action_codes"))
     source = "|".join(
-        [trade_date, health_outcome, summary, ",".join(top_action_codes)]
+        [
+            str(DISPATCH_KEY_VERSION),
+            trade_date,
+            health_outcome,
+            title,
+            summary,
+            text,
+            ",".join(top_action_codes),
+        ]
     )
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
@@ -204,6 +215,7 @@ def _build_dispatch_payload(
         "health_outcome": health_outcome,
         "should_notify": should_notify,
         "force": force,
+        "dispatch_key_version": DISPATCH_KEY_VERSION,
         "dispatch_key": dispatch_key,
         "title": title,
         "summary": summary,

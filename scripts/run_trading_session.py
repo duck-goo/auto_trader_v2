@@ -21,6 +21,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,18 @@ from strategy import (
 
 KST = pytz.timezone("Asia/Seoul")
 DEFAULT_POLLING_LOCK_PREFIX = "intraday_trading_polling"
+BUY_STRATEGY_SELECTION_FILE = "buy_strategy.selection.json"
+BUY_STRATEGY_SOURCE_CLI = "cli"
+BUY_STRATEGY_SOURCE_LEGACY_FLAGS = "legacy_flags"
+BUY_STRATEGY_SOURCE_SELECTION_FILE = "selection_file"
+BUY_STRATEGY_SOURCE_DEFAULT = "default"
+
+
+@dataclass(frozen=True)
+class EffectiveBuyStrategySelection:
+    buy_strategy: str | None
+    source: str
+    selection_path: str | None
 
 
 def _section(title: str) -> None:
@@ -489,6 +502,60 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _buy_strategy_selection_path(trade_date: str) -> Path:
+    ops_root = (PROJECT_ROOT / "data" / "ops").resolve()
+    selection_path = (ops_root / trade_date / BUY_STRATEGY_SELECTION_FILE).resolve()
+    if ops_root not in selection_path.parents:
+        raise ValueError(f"Invalid trade_date for buy strategy path: {trade_date!r}")
+    return selection_path
+
+
+def _resolve_effective_buy_strategy(
+    args: argparse.Namespace,
+) -> EffectiveBuyStrategySelection:
+    """Resolve the buy strategy source in strict priority order.
+
+    CLI arguments remain the safest and most explicit source. The UI selection
+    artifact is used only when the operator did not pass strategy flags.
+    """
+
+    if args.buy_strategy is not None:
+        return EffectiveBuyStrategySelection(
+            buy_strategy=args.buy_strategy,
+            source=BUY_STRATEGY_SOURCE_CLI,
+            selection_path=None,
+        )
+
+    if args.scan_timing1 or args.scan_timing2:
+        return EffectiveBuyStrategySelection(
+            buy_strategy=None,
+            source=BUY_STRATEGY_SOURCE_LEGACY_FLAGS,
+            selection_path=None,
+        )
+
+    selection_path = _buy_strategy_selection_path(args.trade_date)
+    payload = _load_json(selection_path)
+    if payload is None:
+        return EffectiveBuyStrategySelection(
+            buy_strategy=None,
+            source=BUY_STRATEGY_SOURCE_DEFAULT,
+            selection_path=str(selection_path),
+        )
+
+    buy_strategy = payload.get("buy_strategy")
+    if not isinstance(buy_strategy, str) or buy_strategy not in BUY_STRATEGY_CHOICES:
+        raise ValueError(
+            f"Invalid buy_strategy in {selection_path}: {buy_strategy!r}. "
+            f"Expected one of {', '.join(BUY_STRATEGY_CHOICES)}."
+        )
+
+    return EffectiveBuyStrategySelection(
+        buy_strategy=buy_strategy,
+        source=BUY_STRATEGY_SOURCE_SELECTION_FILE,
+        selection_path=str(selection_path),
+    )
+
+
 def _append_option(command: list[str], flag: str, value: Any | None) -> None:
     if value is None:
         return
@@ -504,28 +571,52 @@ def _append_repeatable_option(
         command.extend([flag, value])
 
 
-def _resolve_scan_selection(args: argparse.Namespace) -> tuple[bool, bool]:
+def _resolve_scan_selection(
+    args: argparse.Namespace,
+    *,
+    effective_buy_strategy: str | None = None,
+) -> tuple[bool, bool]:
     return resolve_buy_strategy_selection(
-        buy_strategy=args.buy_strategy,
+        buy_strategy=(
+            effective_buy_strategy
+            if effective_buy_strategy is not None
+            else args.buy_strategy
+        ),
         scan_timing1=args.scan_timing1,
         scan_timing2=args.scan_timing2,
     )
 
 
-def _explicit_timing2_intraday_requested(args: argparse.Namespace) -> bool:
-    return args.scan_timing2 or args.buy_strategy in (
+def _explicit_timing2_intraday_requested(
+    args: argparse.Namespace,
+    *,
+    effective_buy_strategy: str | None = None,
+) -> bool:
+    buy_strategy = (
+        effective_buy_strategy
+        if effective_buy_strategy is not None
+        else args.buy_strategy
+    )
+    return args.scan_timing2 or buy_strategy in (
         BUY_STRATEGY_TIMING2,
         BUY_STRATEGY_BOTH,
     )
 
 
-def _check_timing2_preopen_setup_args(args: argparse.Namespace) -> None:
+def _check_timing2_preopen_setup_args(
+    args: argparse.Namespace,
+    *,
+    effective_buy_strategy: str | None = None,
+) -> None:
     if args.preopen_write_timing2_signals and not args.preopen_scan_timing2_setup:
         raise ValueError(
             "--preopen-write-timing2-signals requires --preopen-scan-timing2-setup."
         )
 
-    if not _explicit_timing2_intraday_requested(args):
+    if not _explicit_timing2_intraday_requested(
+        args,
+        effective_buy_strategy=effective_buy_strategy,
+    ):
         return
 
     if args.preopen_scan_timing2_setup and args.preopen_write_timing2_signals:
@@ -608,8 +699,12 @@ def _build_polling_command(
     args: argparse.Namespace,
     db_path: str,
     output_path: Path,
+    effective_buy_strategy: str | None = None,
 ) -> list[str]:
-    _resolve_scan_selection(args)
+    _resolve_scan_selection(
+        args,
+        effective_buy_strategy=effective_buy_strategy,
+    )
     command = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "run_intraday_trading_polling.py"),
@@ -702,11 +797,11 @@ def _build_polling_command(
                 str(args.max_daily_loss),
             ]
         )
-    if args.buy_strategy is not None:
-        command.extend(["--buy-strategy", args.buy_strategy])
+    if effective_buy_strategy is not None:
+        command.extend(["--buy-strategy", effective_buy_strategy])
     elif args.scan_timing1:
         command.append("--scan-timing1")
-    if args.buy_strategy is None and args.scan_timing2:
+    if effective_buy_strategy is None and args.scan_timing2:
         command.append("--scan-timing2")
     if args.execute:
         command.append("--execute")
@@ -744,6 +839,8 @@ def _build_payload(
     polling_lock_name: str,
     output_path: Path | None,
     buy_strategy: str | None = None,
+    buy_strategy_source: str | None = None,
+    buy_strategy_selection_path: str | None = None,
     run_timing1: bool | None = None,
     run_timing2: bool | None = None,
 ) -> dict[str, Any]:
@@ -751,6 +848,8 @@ def _build_payload(
         "trade_date": trade_date,
         "execute_mode": execute_mode,
         "buy_strategy": buy_strategy,
+        "buy_strategy_source": buy_strategy_source,
+        "buy_strategy_selection_path": buy_strategy_selection_path,
         "run_timing1": run_timing1,
         "run_timing2": run_timing2,
         "started_at": started_at,
@@ -819,8 +918,15 @@ def main() -> int:
 
     try:
         _check_master_source_args(args)
-        run_timing1, run_timing2 = _resolve_scan_selection(args)
-        _check_timing2_preopen_setup_args(args)
+        effective_buy_strategy = _resolve_effective_buy_strategy(args)
+        run_timing1, run_timing2 = _resolve_scan_selection(
+            args,
+            effective_buy_strategy=effective_buy_strategy.buy_strategy,
+        )
+        _check_timing2_preopen_setup_args(
+            args,
+            effective_buy_strategy=effective_buy_strategy.buy_strategy,
+        )
         _validate_positive_int("daily_count", args.daily_count)
         _validate_positive_int("min_price", args.min_price)
         _validate_positive_int("max_price", args.max_price)
@@ -919,6 +1025,9 @@ def main() -> int:
             run_timing2=run_timing2,
         ),
     )
+    _ok("buy_strategy_source", effective_buy_strategy.source)
+    if effective_buy_strategy.selection_path is not None:
+        _ok("buy_strategy_selection_path", effective_buy_strategy.selection_path)
     _ok("db_path", str(db_path))
     _ok("polling_lock_name", polling_lock_name)
     _ok(
@@ -976,6 +1085,8 @@ def main() -> int:
                     run_timing1=run_timing1,
                     run_timing2=run_timing2,
                 ),
+                buy_strategy_source=effective_buy_strategy.source,
+                buy_strategy_selection_path=effective_buy_strategy.selection_path,
                 run_timing1=run_timing1,
                 run_timing2=run_timing2,
             )
@@ -1005,6 +1116,8 @@ def main() -> int:
                     run_timing1=run_timing1,
                     run_timing2=run_timing2,
                 ),
+                buy_strategy_source=effective_buy_strategy.source,
+                buy_strategy_selection_path=effective_buy_strategy.selection_path,
                 run_timing1=run_timing1,
                 run_timing2=run_timing2,
             )
@@ -1053,6 +1166,7 @@ def main() -> int:
                 args=args,
                 db_path=str(db_path),
                 output_path=polling_output_path,
+                effective_buy_strategy=effective_buy_strategy.buy_strategy,
             )
             _section("Polling Launch")
             _ok("script", "run_intraday_trading_polling.py")
@@ -1113,6 +1227,8 @@ def main() -> int:
                 run_timing1=run_timing1,
                 run_timing2=run_timing2,
             ),
+            buy_strategy_source=effective_buy_strategy.source,
+            buy_strategy_selection_path=effective_buy_strategy.selection_path,
             run_timing1=run_timing1,
             run_timing2=run_timing2,
         )

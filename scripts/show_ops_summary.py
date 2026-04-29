@@ -220,13 +220,17 @@ def _build_step_status_level(
 
 def _build_startup_warning_flags(
     startup_outcome: Any,
+    reconcile_reason_code: Any,
     universe_exists: Any,
     unresolved_order_count: Any,
 ) -> list[str]:
     warning_flags: list[str] = []
     startup_outcome_text = _optional_text(startup_outcome)
     if startup_outcome_text == "BLOCKED":
-        warning_flags.append("STARTUP_BLOCKED")
+        if _optional_text(reconcile_reason_code) == "OPEN_ENTRY_LOT_POSITION_MISMATCH":
+            warning_flags.append("STARTUP_OPEN_ENTRY_LOT_POSITION_MISMATCH")
+        else:
+            warning_flags.append("STARTUP_BLOCKED")
     elif startup_outcome_text and startup_outcome_text not in OK_STEP_OUTCOMES:
         warning_flags.append("STARTUP_NOT_READY")
     if universe_exists is False:
@@ -324,6 +328,7 @@ def _build_startup_summary(step: dict[str, Any]) -> dict[str, Any]:
     )
     warning_flags = _build_startup_warning_flags(
         startup_outcome=result.get("outcome"),
+        reconcile_reason_code=result.get("reconcile_reason_code"),
         universe_exists=universe_exists,
         unresolved_order_count=unresolved_order_count,
     )
@@ -336,6 +341,9 @@ def _build_startup_summary(step: dict[str, Any]) -> dict[str, Any]:
         "checked_at": result.get("checked_at"),
         "startup_outcome": result.get("outcome"),
         "startup_reason": result.get("reason"),
+        "reconcile_reason_code": result.get("reconcile_reason_code"),
+        "reconcile_reason_message": result.get("reconcile_reason_message"),
+        "reconcile_changed_rows": result.get("reconcile_changed_rows"),
         "universe_exists": universe_exists,
         "universe_candidate_count": (
             None
@@ -510,6 +518,19 @@ def _print_startup_summary(step: dict[str, Any]) -> None:
     _section("Startup Check")
     _ok("outcome", str(step.get("startup_outcome")))
     _ok("reason", "" if step.get("startup_reason") is None else str(step.get("startup_reason")))
+    _ok(
+        "reconcile_reason_code",
+        "" if step.get("reconcile_reason_code") is None else str(step.get("reconcile_reason_code")),
+    )
+    _ok(
+        "reconcile_reason_message",
+        (
+            ""
+            if step.get("reconcile_reason_message") is None
+            else str(step.get("reconcile_reason_message"))
+        ),
+    )
+    _ok("reconcile_changed_rows", str(step.get("reconcile_changed_rows")))
     _ok("universe_exists", str(step.get("universe_exists")))
     _ok("universe_candidate_count", str(step.get("universe_candidate_count")))
     _ok("unresolved_order_count", str(step.get("unresolved_order_count")))

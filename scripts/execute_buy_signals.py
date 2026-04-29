@@ -39,6 +39,7 @@ from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
     DailyStatsRepository,
+    EntryLotRepository,
     OrderRepository,
     PositionRepository,
     RuntimeLockRepository,
@@ -392,6 +393,7 @@ def main() -> int:
             signal_repo = SignalRepository(conn)
             order_repo = OrderRepository(conn)
             position_repo = PositionRepository(conn)
+            entry_lot_repo = EntryLotRepository(conn)
             daily_stats_repo = DailyStatsRepository(conn)
             trading_control_repo = TradingControlRepository(conn)
             order_service = OrderService(
@@ -412,6 +414,7 @@ def main() -> int:
                     trading_control_repo=trading_control_repo,
                     daily_stats_repo=daily_stats_repo,
                 ),
+                entry_lot_repo=entry_lot_repo,
             )
             result = service.execute_pending_signals(
                 trade_date=args.trade_date,
