@@ -7,6 +7,26 @@ class ServiceError(RuntimeError):
     """Base class for service-layer errors."""
 
 
+class MissingTiming1ConvergenceSignalsError(ServiceError):
+    """Raised when timing1 intraday scans require missing convergence signals."""
+
+    def __init__(self, *, trade_date: str) -> None:
+        super().__init__(
+            f"Timing1 convergence signals are missing for trade_date={trade_date!r}."
+        )
+        self.trade_date = trade_date
+
+
+class MissingTiming2SetupSignalsError(ServiceError):
+    """Raised when timing2 intraday scans require missing setup signals."""
+
+    def __init__(self, *, trade_date: str) -> None:
+        super().__init__(
+            f"Timing2 setup signals are missing for trade_date={trade_date!r}."
+        )
+        self.trade_date = trade_date
+
+
 class RuntimeLockBusyError(ServiceError):
     """Raised when another live process already holds a runtime lock."""
 

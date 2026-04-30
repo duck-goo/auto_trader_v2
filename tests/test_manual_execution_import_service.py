@@ -9,6 +9,7 @@ from storage.migrations.runner import run_migrations
 from storage.repositories import (
     DbOrderStatus,
     ENTRY_SLOT_TIMING2_MORNING,
+    ENTRY_SLOT_TIMING2_RANGE,
     EntryLotRepository,
     ExecutionRepository,
     OrderRepository,
@@ -21,6 +22,7 @@ from services import (
     ManualExecutionImportService,
     STRATEGY_NAME_SELL_EXECUTION_AUDIT,
     STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+    STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
     STRATEGY_NAME_TIMING2_LOT_TAKE_PROFIT_PARTIAL,
 )
 
@@ -58,30 +60,36 @@ def _create_open_timing2_lot(
     *,
     qty: int = 5,
     price: int = 10_000,
+    strategy_name: str = STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+    requested_at: str = "2026-04-17T09:00:00+09:00",
+    submitted_at: str = "2026-04-17T09:00:01+09:00",
+    executed_at: str = "2026-04-17T09:01:00+09:00",
 ) -> int:
     with transaction(conn):
         order = order_repo.create(
-            client_order_id=f"BUY_TIMING2_LOT_{qty}_{price}",
+            client_order_id=(
+                f"BUY_TIMING2_LOT_{strategy_name.replace('-', '_')}_{qty}_{price}"
+            ),
             symbol="005930",
             side="buy",
             qty=qty,
             price=0,
             order_type="MARKET",
-            strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
-            requested_at="2026-04-17T09:00:00+09:00",
+            strategy_name=strategy_name,
+            requested_at=requested_at,
         )
         order_repo.mark_submitted(
             client_order_id=order.client_order_id,
             kis_order_no="KIS-BUY-005930",
-            submitted_at="2026-04-17T09:00:01+09:00",
+            submitted_at=submitted_at,
         )
         lot = entry_lot_repo.apply_buy_execution(
             entry_order_id=order.id,
             symbol="005930",
             qty=qty,
             price=price,
-            executed_at="2026-04-17T09:01:00+09:00",
-            entry_strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+            executed_at=executed_at,
+            entry_strategy_name=strategy_name,
         )
     return lot.id
 
@@ -117,6 +125,7 @@ def _record_sell_execution_audit(
     *,
     client_order_id: str,
     lot_id: int,
+    requested_sell_qty: int = 3,
     sell_cost_rate: float = 0.002,
 ) -> None:
     with transaction(conn):
@@ -131,8 +140,8 @@ def _record_sell_execution_audit(
                 "symbol": "005930",
                 "name": "Name-005930",
                 "source_lot_id": lot_id,
-                "requested_sell_qty": 3,
-                "order_qty": 3,
+                "requested_sell_qty": requested_sell_qty,
+                "order_qty": requested_sell_qty,
                 "sell_cost_rate": sell_cost_rate,
                 "client_order_id": client_order_id,
                 "execution_outcome": "SUBMITTED",
@@ -201,6 +210,126 @@ def test_execute_import_inserts_execution_and_updates_order_and_position(test_db
         assert lots[0].total_buy_qty == 2
         assert lots[0].remaining_qty == 2
         assert lots[0].avg_buy_price == 70_500
+    finally:
+        conn.close()
+
+
+def test_execute_import_persists_separate_timing2_range_lot_when_morning_lot_is_open(
+    test_db_path,
+):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        order_repo = OrderRepository(conn)
+        execution_repo = ExecutionRepository(conn)
+        position_repo = PositionRepository(conn)
+        entry_lot_repo = EntryLotRepository(conn)
+
+        with transaction(conn):
+            morning_order = order_repo.create(
+                client_order_id="COID_TIMING2_MORNING_FILLED",
+                symbol="005930",
+                side="buy",
+                qty=3,
+                price=70_000,
+                order_type="MARKET",
+                strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+                requested_at="2026-04-17T09:01:00+09:00",
+            )
+            order_repo.mark_submitted(
+                client_order_id=morning_order.client_order_id,
+                kis_order_no="KIS-MORNING-005930",
+                submitted_at="2026-04-17T09:01:01+09:00",
+            )
+            execution_repo.insert_if_new(
+                order_id=morning_order.id,
+                kis_exec_no="EXEC-MORNING-005930",
+                symbol="005930",
+                side="buy",
+                qty=3,
+                price=70_000,
+                executed_at="2026-04-17T09:02:00+09:00",
+            )
+            order_repo.mark_filled(
+                client_order_id=morning_order.client_order_id,
+                closed_at="2026-04-17T09:02:00+09:00",
+            )
+            position_repo.apply_execution(
+                symbol="005930",
+                side="buy",
+                qty=3,
+                price=70_000,
+                executed_at="2026-04-17T09:02:00+09:00",
+            )
+            entry_lot_repo.apply_buy_execution(
+                entry_order_id=morning_order.id,
+                symbol="005930",
+                qty=3,
+                price=70_000,
+                executed_at="2026-04-17T09:02:00+09:00",
+                entry_strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+            )
+
+        _seed_submitted_order(
+            conn,
+            order_repo,
+            client_order_id="COID_TIMING2_RANGE_IMPORT",
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+        )
+
+        service = ManualExecutionImportService(
+            conn=conn,
+            order_repo=order_repo,
+            execution_repo=execution_repo,
+            position_repo=position_repo,
+            entry_lot_repo=entry_lot_repo,
+        )
+
+        result = service.import_items(
+            items=[
+                ManualExecutionImportItem(
+                    client_order_id="COID_TIMING2_RANGE_IMPORT",
+                    kis_exec_no="EXEC-RANGE-005930",
+                    qty=2,
+                    price=71_500,
+                    executed_at="2026-04-17T10:00:35+09:00",
+                )
+            ],
+            execute_import=True,
+        )
+
+        assert result.imported_count == 1
+        assert result.candidates[0].outcome == ManualExecutionImportOutcome.IMPORTED
+
+        range_order = order_repo.get_by_client_order_id("COID_TIMING2_RANGE_IMPORT")
+        assert range_order is not None
+        assert range_order.status == DbOrderStatus.FILLED
+        assert range_order.filled_qty == 2
+        assert range_order.avg_fill_price == 71_500
+
+        lots = entry_lot_repo.list_open_by_symbol(symbol="005930")
+        assert len(lots) == 2
+
+        morning_lot = next(
+            lot for lot in lots if lot.entry_slot == ENTRY_SLOT_TIMING2_MORNING
+        )
+        range_lot = next(
+            lot for lot in lots if lot.entry_slot == ENTRY_SLOT_TIMING2_RANGE
+        )
+
+        assert morning_lot.total_buy_qty == 3
+        assert morning_lot.remaining_qty == 3
+        assert morning_lot.avg_buy_price == 70_000
+
+        assert range_lot.entry_order_id == range_order.id
+        assert range_lot.entry_strategy_name == STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER
+        assert range_lot.total_buy_qty == 2
+        assert range_lot.remaining_qty == 2
+        assert range_lot.avg_buy_price == 71_500
+
+        position = position_repo.get("005930")
+        assert position is not None
+        assert position.qty == 5
     finally:
         conn.close()
 
@@ -569,5 +698,108 @@ def test_execute_import_blocks_lot_level_sell_when_audit_is_missing(test_db_path
         lot = entry_lot_repo.get(lot_id)
         assert lot is not None
         assert lot.remaining_qty == 5
+    finally:
+        conn.close()
+
+
+def test_execute_import_reduces_only_targeted_range_lot_when_morning_and_range_lots_exist(
+    test_db_path,
+):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        order_repo = OrderRepository(conn)
+        execution_repo = ExecutionRepository(conn)
+        position_repo = PositionRepository(conn)
+        entry_lot_repo = EntryLotRepository(conn)
+        signal_repo = SignalRepository(conn)
+
+        with transaction(conn):
+            position_repo.upsert_from_broker(
+                symbol="005930",
+                qty=5,
+                avg_price=10_400,
+                updated_at="2026-04-17T10:00:00+09:00",
+            )
+
+        morning_lot_id = _create_open_timing2_lot(
+            conn,
+            order_repo,
+            entry_lot_repo,
+            qty=3,
+            price=10_000,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+            requested_at="2026-04-17T09:00:00+09:00",
+            submitted_at="2026-04-17T09:00:01+09:00",
+            executed_at="2026-04-17T09:01:00+09:00",
+        )
+        range_lot_id = _create_open_timing2_lot(
+            conn,
+            order_repo,
+            entry_lot_repo,
+            qty=2,
+            price=11_000,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+            requested_at="2026-04-17T10:00:00+09:00",
+            submitted_at="2026-04-17T10:00:01+09:00",
+            executed_at="2026-04-17T10:00:30+09:00",
+        )
+        _seed_submitted_lot_sell_order(
+            conn,
+            order_repo,
+            client_order_id="SELL_TIMING2_RANGE_ONLY",
+            qty=2,
+        )
+        _record_sell_execution_audit(
+            conn,
+            signal_repo,
+            client_order_id="SELL_TIMING2_RANGE_ONLY",
+            lot_id=range_lot_id,
+            requested_sell_qty=2,
+            sell_cost_rate=0.002,
+        )
+
+        service = ManualExecutionImportService(
+            conn=conn,
+            order_repo=order_repo,
+            execution_repo=execution_repo,
+            position_repo=position_repo,
+            entry_lot_repo=entry_lot_repo,
+            signal_repo=signal_repo,
+        )
+
+        result = service.import_items(
+            items=[
+                ManualExecutionImportItem(
+                    client_order_id="SELL_TIMING2_RANGE_ONLY",
+                    kis_exec_no="SELL-RANGE-EXEC-1",
+                    qty=2,
+                    price=11_500,
+                    executed_at="2026-04-17T10:11:00+09:00",
+                )
+            ],
+            execute_import=True,
+        )
+
+        assert result.imported_count == 1
+        assert result.candidates[0].outcome == ManualExecutionImportOutcome.IMPORTED
+
+        position = position_repo.get("005930")
+        assert position is not None
+        assert position.qty == 3
+
+        morning_lot = entry_lot_repo.get(morning_lot_id)
+        assert morning_lot is not None
+        assert morning_lot.entry_slot == ENTRY_SLOT_TIMING2_MORNING
+        assert morning_lot.remaining_qty == 3
+        assert morning_lot.realized_sell_qty == 0
+        assert morning_lot.status == "OPEN"
+
+        range_lot = entry_lot_repo.get(range_lot_id)
+        assert range_lot is not None
+        assert range_lot.entry_slot == ENTRY_SLOT_TIMING2_RANGE
+        assert range_lot.remaining_qty == 0
+        assert range_lot.realized_sell_qty == 2
+        assert range_lot.status == "CLOSED"
     finally:
         conn.close()

@@ -704,8 +704,12 @@ pre {
 }
 
 .info-banner-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   min-width: 180px;
+  text-decoration: none;
 }
 
 .error-banner {

@@ -3,6 +3,8 @@
 from services.errors import (
     DuplicateClientOrderIdError,
     InsufficientPositionError,
+    MissingTiming1ConvergenceSignalsError,
+    MissingTiming2SetupSignalsError,
     RuntimeLockBusyError,
     ServiceError,
 )
@@ -265,6 +267,8 @@ __all__ = [
     "CancelResult",
     "DuplicateClientOrderIdError",
     "InsufficientPositionError",
+    "MissingTiming1ConvergenceSignalsError",
+    "MissingTiming2SetupSignalsError",
     "IntradayTriggerCombinedScanResult",
     "IntradayTriggerCombinedScanService",
     "IntradayTriggerStrategyStatus",

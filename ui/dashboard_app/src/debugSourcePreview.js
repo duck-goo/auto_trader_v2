@@ -10,6 +10,22 @@ const DEFAULT_DEBUG_FILE_NAME = "uploaded_review_snapshot.json";
 const DEFAULT_DEBUG_LONG_FILE_NAME =
   "very_long_operational_review_snapshot_filename_2026_04_29_final.json";
 
+export function resolveInitialTradeDate(search, fallbackTradeDate) {
+  const params = new URLSearchParams(search || "");
+  return params.get("trade_date") || fallbackTradeDate || "-";
+}
+
+export function buildPreviewExitUrl(pathname, tradeDate) {
+  const safePathname = pathname || "/";
+  if (!tradeDate) {
+    return safePathname;
+  }
+
+  const params = new URLSearchParams();
+  params.set("trade_date", tradeDate);
+  return `${safePathname}?${params.toString()}`;
+}
+
 function resolvePreviewUpdateKind(rawValue) {
   switch (rawValue) {
     case "partial-controls":
@@ -51,7 +67,7 @@ export function resolveDebugSourcePreview(search, defaultTradeDate) {
     return null;
   }
 
-  const tradeDate = params.get("trade_date") || defaultTradeDate || "-";
+  const tradeDate = resolveInitialTradeDate(search, defaultTradeDate);
   const requestedFileName = params.get("source_filename") || "";
   const updateKind = resolvePreviewUpdateKind(params.get("source_update"));
 
@@ -84,6 +100,7 @@ export function resolveDebugSourcePreview(search, defaultTradeDate) {
         ? "unknown"
         : "connected",
     notice: buildPreviewNotice(previewMode, updateKind),
+    suppressConnectedBanner: true,
     skipInitialApiLoad: true,
     sourceInfo:
       updateKind === SNAPSHOT_SOURCE_UPDATE_KINDS.FULL

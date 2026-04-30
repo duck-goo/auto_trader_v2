@@ -220,7 +220,12 @@ class BuySignalExecutionService:
     ) -> BuySignalExecutionResult:
         normalized_settings = settings.validated()
         normalized_limit = _require_positive_int("signal_limit", signal_limit)
-        executed_at = self._now_fn().astimezone(_KST).isoformat()
+        observed_now = self._now_fn().astimezone(_KST)
+        executed_at = observed_now.isoformat()
+        self._validate_runtime_trade_date(
+            trade_date=trade_date,
+            observed_at=observed_now,
+        )
 
         pending_candidates = self._load_pending_candidates(
             trade_date=trade_date,
@@ -432,6 +437,10 @@ class BuySignalExecutionService:
         list[BuyTriggerSignalCandidate],
         list[tuple[BuyTriggerSignalCandidate, BuyTriggerSignalCandidate]],
     ]:
+        # Keep exactly one active buy candidate per symbol for one execution
+        # pass. Unlike lot-level sell signals, superseded buy signals are
+        # consumed immediately because the service does not support multiple
+        # concurrent entry attempts for the same symbol in one pass.
         primary_by_symbol: dict[str, BuyTriggerSignalCandidate] = {}
         superseded: list[tuple[BuyTriggerSignalCandidate, BuyTriggerSignalCandidate]] = []
         ordered = sorted(
@@ -818,6 +827,19 @@ class BuySignalExecutionService:
                 f"Failed to place buy order for symbol={symbol}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+
+    @staticmethod
+    def _validate_runtime_trade_date(
+        *,
+        trade_date: str,
+        observed_at: datetime,
+    ) -> None:
+        runtime_trade_date = observed_at.astimezone(_KST).strftime("%Y-%m-%d")
+        if runtime_trade_date != trade_date:
+            raise ServiceError(
+                "Buy signal execution supports only the current KST trade_date: "
+                f"runtime_trade_date={runtime_trade_date}, trade_date={trade_date}"
+            )
 
     @staticmethod
     def _build_blocked_candidate(

@@ -36,11 +36,14 @@ class FakeBroker(BrokerInterface):
     ) -> None:
         self._snapshot_map = snapshot_map
         self._daily_map = daily_map
+        self.current_price_calls: list[str] = []
+        self.daily_candle_calls: list[str] = []
 
     def get_access_token(self) -> str:
         raise NotImplementedError
 
     def get_current_price(self, code: str) -> PriceSnapshot:
+        self.current_price_calls.append(code)
         return self._snapshot_map[code]
 
     def get_daily_candles(
@@ -49,6 +52,7 @@ class FakeBroker(BrokerInterface):
         count: int = 30,
         end_date: str | None = None,
     ) -> pd.DataFrame:
+        self.daily_candle_calls.append(code)
         return self._daily_map[code]
 
     def get_minute_candles(
@@ -281,3 +285,29 @@ def test_scan_raises_when_convergence_signals_are_missing(conn):
             settings=Timing1IntradayTriggerSettings(),
             write_signals=False,
         )
+
+
+def test_scan_rejects_non_current_runtime_trade_date_before_broker_calls(conn):
+    _seed_convergence_signal(conn, convergence_trade_date="2026-04-15")
+    signal_repo = SignalRepository(conn)
+    broker = FakeBroker(
+        snapshot_map={"005930": _price_snapshot(price=104, hour=9, minute=5)},
+        daily_map={"005930": _daily_df(latest_completed_date="2026-04-15")},
+    )
+
+    service = Timing1IntradayTriggerService(
+        broker=broker,
+        conn=conn,
+        signal_repo=signal_repo,
+        now_fn=lambda: KST.localize(datetime(2026, 4, 17, 9, 5, 0)),
+    )
+
+    with pytest.raises(ServiceError, match="supports only the current KST trade_date"):
+        service.scan(
+            trade_date=TRADE_DATE,
+            settings=Timing1IntradayTriggerSettings(),
+            write_signals=False,
+        )
+
+    assert broker.current_price_calls == []
+    assert broker.daily_candle_calls == []

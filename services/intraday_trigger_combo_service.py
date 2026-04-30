@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Union
 
 from broker.base import BrokerInterface
+from services.errors import (
+    MissingTiming1ConvergenceSignalsError,
+    MissingTiming2SetupSignalsError,
+)
 from services.timing1_intraday_trigger_service import (
     Timing1IntradayTriggerScanResult,
     Timing1IntradayTriggerService,
@@ -127,14 +131,15 @@ class IntradayTriggerCombinedScanService:
                 reason=None,
                 result=result,
             )
+        except MissingTiming1ConvergenceSignalsError as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            return IntradayTriggerStrategyStatus(
+                outcome="SKIPPED",
+                reason=message,
+                result=None,
+            )
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
-            if "Timing1 convergence signals are missing" in str(exc):
-                return IntradayTriggerStrategyStatus(
-                    outcome="SKIPPED",
-                    reason=message,
-                    result=None,
-                )
             return IntradayTriggerStrategyStatus(
                 outcome="FAILED",
                 reason=message,
@@ -159,14 +164,15 @@ class IntradayTriggerCombinedScanService:
                 reason=None,
                 result=result,
             )
+        except MissingTiming2SetupSignalsError as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            return IntradayTriggerStrategyStatus(
+                outcome="SKIPPED",
+                reason=message,
+                result=None,
+            )
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
-            if "Timing2 setup signals are missing" in str(exc):
-                return IntradayTriggerStrategyStatus(
-                    outcome="SKIPPED",
-                    reason=message,
-                    result=None,
-                )
             return IntradayTriggerStrategyStatus(
                 outcome="FAILED",
                 reason=message,

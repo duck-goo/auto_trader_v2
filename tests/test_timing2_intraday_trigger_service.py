@@ -30,6 +30,7 @@ TRADE_DATE = "2026-04-15"
 class FakeBroker(BrokerInterface):
     def __init__(self, snapshot_map: dict[str, PriceSnapshot]) -> None:
         self._snapshot_map = snapshot_map
+        self.current_price_calls: list[str] = []
 
     def set_snapshot(self, code: str, snapshot: PriceSnapshot) -> None:
         self._snapshot_map[code] = snapshot
@@ -38,6 +39,7 @@ class FakeBroker(BrokerInterface):
         raise NotImplementedError
 
     def get_current_price(self, code: str) -> PriceSnapshot:
+        self.current_price_calls.append(code)
         return self._snapshot_map[code]
 
     def get_daily_candles(
@@ -243,3 +245,27 @@ def test_scan_raises_when_timing2_setup_signals_are_missing(conn):
             settings=Timing2IntradayTriggerSettings(),
             write_signals=False,
         )
+
+
+def test_scan_rejects_non_current_runtime_trade_date_before_broker_calls(conn):
+    _seed_timing2_setup_signal(conn)
+    signal_repo = SignalRepository(conn)
+    broker = FakeBroker(
+        {"005930": _price_snapshot(price=1004, open_price=1000, hour=9, minute=5)}
+    )
+
+    service = Timing2IntradayTriggerService(
+        broker=broker,
+        conn=conn,
+        signal_repo=signal_repo,
+        now_fn=lambda: KST.localize(datetime(2026, 4, 16, 9, 5, 0)),
+    )
+
+    with pytest.raises(Exception, match="supports only the current KST trade_date"):
+        service.scan(
+            trade_date=TRADE_DATE,
+            settings=Timing2IntradayTriggerSettings(),
+            write_signals=False,
+        )
+
+    assert broker.current_price_calls == []

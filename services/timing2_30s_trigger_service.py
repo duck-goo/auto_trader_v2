@@ -11,7 +11,7 @@ from typing import Callable
 import pytz
 
 from logger import get_logger
-from services.errors import ServiceError
+from services.errors import MissingTiming2SetupSignalsError, ServiceError
 from services.timing2_setup_scan_service import STRATEGY_NAME_TIMING2_SETUP
 from storage.db import transaction
 from storage.repositories import (
@@ -114,9 +114,7 @@ class Timing2ThirtySecondTriggerService:
     ) -> Timing2ThirtySecondTriggerScanResult:
         setup_signals = self._load_setup_signal_map(trade_date=trade_date)
         if not setup_signals:
-            raise ServiceError(
-                f"Timing2 setup signals are missing for trade_date={trade_date!r}."
-            )
+            raise MissingTiming2SetupSignalsError(trade_date=trade_date)
 
         dip_map = self._load_signal_map(
             strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_DIP,

@@ -9,6 +9,7 @@ from services.buy_signal_execution_service import (
     BuySignalExecutionService,
     BuySignalExecutionSettings,
 )
+from services.errors import MissingTiming2SetupSignalsError
 from services.intraday_bar_15m_refresh_service import (
     IntradayBar15mRefreshService,
 )
@@ -330,9 +331,9 @@ class IntradayTradingCycleService:
                 write_samples=write_samples,
                 max_symbols=max_symbols,
             )
+        except MissingTiming2SetupSignalsError as exc:
+            return self._skipped(f"{type(exc).__name__}: {exc}")
         except Exception as exc:
-            if "Timing2 setup signals are missing" in str(exc):
-                return self._skipped(f"{type(exc).__name__}: {exc}")
             return self._failed(exc)
 
         reason = None
@@ -368,9 +369,9 @@ class IntradayTradingCycleService:
                 min_samples_per_bar=min_samples_per_bar,
                 write_bars=write_bars,
             )
+        except MissingTiming2SetupSignalsError as exc:
+            return self._skipped(f"{type(exc).__name__}: {exc}")
         except Exception as exc:
-            if "Timing2 setup signals are missing" in str(exc):
-                return self._skipped(f"{type(exc).__name__}: {exc}")
             return self._failed(exc)
 
         reason = None
@@ -458,6 +459,10 @@ class IntradayTradingCycleService:
         write_signals: bool,
     ) -> IntradayTradingCycleStepStatus:
         try:
+            # Timing2 buy entries in the intraday cycle are produced by the
+            # dedicated 30-second trigger pipeline. The combined scan step is
+            # intentionally limited to Timing1 so we do not generate duplicate
+            # Timing2 buy signals through the older intraday trigger path.
             result = self._buy_trigger_scan_service.scan(
                 trade_date=trade_date,
                 run_timing1=run_timing1,
@@ -497,9 +502,9 @@ class IntradayTradingCycleService:
                 settings=settings,
                 write_signals=write_signals,
             )
+        except MissingTiming2SetupSignalsError as exc:
+            return self._skipped(f"{type(exc).__name__}: {exc}")
         except Exception as exc:
-            if "Timing2 setup signals are missing" in str(exc):
-                return self._skipped(f"{type(exc).__name__}: {exc}")
             return self._failed(exc)
         return self._completed(result)
 
@@ -545,7 +550,16 @@ class IntradayTradingCycleService:
             return self._skipped(
                 "Skipped because Timing2 30-second bar build failed."
             )
-        if execute_actions and timing2_30s_trigger_scan_status.outcome == "FAILED":
+        timing1_buy_scan_completed = buy_trigger_scan_status.outcome == "COMPLETED"
+        timing2_buy_scan_completed = (
+            timing2_30s_trigger_scan_status.outcome == "COMPLETED"
+        )
+
+        if (
+            execute_actions
+            and timing2_30s_trigger_scan_status.outcome == "FAILED"
+            and not timing1_buy_scan_completed
+        ):
             return self._skipped(
                 "Skipped because Timing2 30-second trigger scan failed."
             )
@@ -553,7 +567,10 @@ class IntradayTradingCycleService:
             return self._skipped(
                 "Skipped because sell execution step failed in this cycle."
             )
-        if buy_trigger_scan_status.outcome == "FAILED":
+        if (
+            buy_trigger_scan_status.outcome == "FAILED"
+            and not timing2_buy_scan_completed
+        ):
             return self._skipped("Skipped because buy trigger scan failed.")
 
         try:

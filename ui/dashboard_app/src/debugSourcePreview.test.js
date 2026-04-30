@@ -2,7 +2,27 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { SNAPSHOT_SOURCE_UPDATE_KINDS } from "./snapshotSourceInfo.js";
-import { resolveDebugSourcePreview } from "./debugSourcePreview.js";
+import {
+  buildPreviewExitUrl,
+  resolveDebugSourcePreview,
+  resolveInitialTradeDate,
+} from "./debugSourcePreview.js";
+
+test("resolves initial trade date from query string", () => {
+  assert.equal(resolveInitialTradeDate("", "2026-04-29"), "2026-04-29");
+  assert.equal(
+    resolveInitialTradeDate("?trade_date=2026-04-18", "2026-04-29"),
+    "2026-04-18",
+  );
+});
+
+test("builds preview exit url with preserved trade date", () => {
+  assert.equal(
+    buildPreviewExitUrl("/", "2026-04-29"),
+    "/?trade_date=2026-04-29",
+  );
+  assert.equal(buildPreviewExitUrl("/", ""), "/");
+});
 
 test("returns null when source preview is not requested", () => {
   assert.equal(resolveDebugSourcePreview("", "2026-04-29"), null);
@@ -16,6 +36,7 @@ test("builds long file source preview from query params", () => {
 
   assert.equal(preview.tradeDate, "2026-04-29");
   assert.equal(preview.apiStatus, "unknown");
+  assert.equal(preview.suppressConnectedBanner, true);
   assert.equal(preview.notice.title, "Preview Mode Active");
   assert.match(preview.notice.detail, /long uploaded file preview/i);
   assert.equal(preview.skipInitialApiLoad, true);
@@ -35,6 +56,7 @@ test("builds partial controls file source preview with connected api status", ()
 
   assert.equal(preview.tradeDate, "2026-04-29");
   assert.equal(preview.apiStatus, "connected");
+  assert.equal(preview.suppressConnectedBanner, true);
   assert.match(preview.notice.detail, /partial controls update/i);
   assert.equal(
     preview.sourceInfo.label,
@@ -54,6 +76,7 @@ test("builds api source preview with explicit trade date", () => {
 
   assert.equal(preview.tradeDate, "2026-04-18");
   assert.equal(preview.apiStatus, "connected");
+  assert.equal(preview.suppressConnectedBanner, true);
   assert.match(preview.notice.detail, /API preview/i);
   assert.equal(preview.sourceInfo.label, "Live API snapshot (2026-04-18)");
 });

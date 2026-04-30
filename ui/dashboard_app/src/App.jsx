@@ -42,7 +42,11 @@ import {
   shouldOfferFullSnapshotReload,
 } from "./snapshotSourceInfo.js";
 import { copyTextToClipboard } from "./copyTextToClipboard.js";
-import { resolveDebugSourcePreview } from "./debugSourcePreview.js";
+import {
+  buildPreviewExitUrl,
+  resolveDebugSourcePreview,
+  resolveInitialTradeDate,
+} from "./debugSourcePreview.js";
 import { sampleSnapshot } from "./sampleSnapshot";
 import { asArray, asText, normalizeSnapshot, statusClassName } from "./snapshot";
 
@@ -50,9 +54,13 @@ const DEFAULT_REFRESH_INTERVAL_SECONDS = 30;
 const MIN_REFRESH_INTERVAL_SECONDS = 10;
 const MAX_REFRESH_INTERVAL_SECONDS = 300;
 const SOURCE_STATUS_MESSAGE_CLEAR_DELAY_MS = 4000;
+const initialQueryTradeDate =
+  typeof window !== "undefined"
+    ? resolveInitialTradeDate(window.location.search, sampleSnapshot.trade_date)
+    : sampleSnapshot.trade_date;
 const initialDebugSourcePreview =
   typeof window !== "undefined"
-    ? resolveDebugSourcePreview(window.location.search, sampleSnapshot.trade_date)
+    ? resolveDebugSourcePreview(window.location.search, initialQueryTradeDate)
     : null;
 
 function clampRefreshInterval(value) {
@@ -376,7 +384,7 @@ function App() {
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [tradeDate, setTradeDate] = useState(
-    initialDebugSourcePreview?.tradeDate || sampleSnapshot.trade_date,
+    initialDebugSourcePreview?.tradeDate || initialQueryTradeDate,
   );
   const [isLoading, setIsLoading] = useState(false);
   const [apiStatus, setApiStatus] = useState(
@@ -442,6 +450,14 @@ function App() {
   const manualSourcePrompt = buildManualSourcePrompt(sourceInfo);
   const sourceAttentionNotice = buildSourceAttentionNotice(sourceInfo);
   const debugSourcePreviewNotice = initialDebugSourcePreview?.notice || null;
+  const suppressConnectedBanner =
+    initialDebugSourcePreview?.suppressConnectedBanner === true;
+  const debugSourcePreviewExitUrl = debugSourcePreviewNotice
+    ? buildPreviewExitUrl(
+        typeof window !== "undefined" ? window.location.pathname : "/",
+        tradeDate,
+      )
+    : "";
   const sourceReviewJumpLabel =
     reloadFullSnapshotPrompt?.reviewLabel ||
     (sourceJumpTarget ? `Jump to ${sourceJumpTarget.label} first` : "");
@@ -587,13 +603,6 @@ function App() {
         buildSourceDetailCopyFailureMessage(canExpandSourceDetail),
       );
     }
-  }
-
-  function handleExitDebugSourcePreview() {
-    if (typeof window === "undefined") {
-      return;
-    }
-    window.location.assign(window.location.pathname);
   }
 
   function loadSample() {
@@ -1023,13 +1032,12 @@ function App() {
               <strong>{debugSourcePreviewNotice.title}</strong>
               <span>{debugSourcePreviewNotice.detail}</span>
             </div>
-            <button
+            <a
               className="secondary-button info-banner-button"
-              type="button"
-              onClick={handleExitDebugSourcePreview}
+              href={debugSourcePreviewExitUrl}
             >
               Exit Preview Mode
-            </button>
+            </a>
           </div>
         </section>
       ) : null}
@@ -1333,7 +1341,7 @@ function App() {
         </div>
       </section>
 
-      {apiStatus === "connected" ? (
+      {apiStatus === "connected" && !suppressConnectedBanner ? (
         <section className="info-banner info-banner-ready">
           {autoRefreshEnabled
             ? `Local snapshot API connected. Auto refresh is running every ${refreshIntervalSeconds} seconds.`

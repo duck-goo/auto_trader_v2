@@ -12,7 +12,7 @@ import pytz
 
 from broker.base import BrokerInterface
 from logger import get_logger
-from services.errors import ServiceError
+from services.errors import MissingTiming1ConvergenceSignalsError, ServiceError
 from services.timing1_convergence_scan_service import (
     STRATEGY_NAME_TIMING1_CONVERGENCE,
 )
@@ -104,9 +104,7 @@ class Timing1IntradayTriggerService:
         normalized_daily_count = self._validate_daily_count(daily_count)
         convergence_signals = self._load_convergence_signal_map(trade_date=trade_date)
         if not convergence_signals:
-            raise ServiceError(
-                f"Timing1 convergence signals are missing for trade_date={trade_date!r}."
-            )
+            raise MissingTiming1ConvergenceSignalsError(trade_date=trade_date)
 
         trigger_map = self._load_signal_map(
             strategy_name=STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER,
@@ -118,7 +116,12 @@ class Timing1IntradayTriggerService:
         )
 
         normalized_settings = settings.validated()
-        scanned_at = self._now_fn().astimezone(_KST).isoformat()
+        observed_now = self._now_fn().astimezone(_KST)
+        self._validate_runtime_trade_date(
+            trade_date=trade_date,
+            observed_at=observed_now,
+        )
+        scanned_at = observed_now.isoformat()
         candidates: list[Timing1IntradayTriggerCandidate] = []
         payloads_to_record: list[tuple[str, dict]] = []
         skipped_not_next_trading_day_count = 0
@@ -464,3 +467,17 @@ class Timing1IntradayTriggerService:
             "target_price": decision.target_price,
             "current_price": decision.current_price,
         }
+
+    @staticmethod
+    def _validate_runtime_trade_date(
+        *,
+        trade_date: str,
+        observed_at: datetime,
+    ) -> None:
+        runtime_trade_date = observed_at.astimezone(_KST).strftime("%Y-%m-%d")
+        if runtime_trade_date != trade_date:
+            raise ServiceError(
+                "Timing1 intraday trigger scan supports only the current KST "
+                f"trade_date: trade_date={trade_date}, "
+                f"runtime_trade_date={runtime_trade_date}"
+            )

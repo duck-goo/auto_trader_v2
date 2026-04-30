@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,8 +15,8 @@ TEST_TEMP_ROOT = PROJECT_ROOT / "data" / "test_runs"
 TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 TEST_TEMPLATE_DB = TEST_TEMP_ROOT / "blank_template.db"
 
-# Keep pytest away from the desktop app temp directory on this Windows setup.
-os.environ.setdefault("PYTEST_DEBUG_TEMPROOT", str(TEST_TEMP_ROOT))
+# Keep application temp files away from the desktop app temp directory on this
+# Windows setup.
 os.environ.setdefault("TMP", str(TEST_TEMP_ROOT))
 os.environ.setdefault("TEMP", str(TEST_TEMP_ROOT))
 
@@ -28,6 +29,18 @@ def test_db_path() -> Path:
     db_path = db_dir / f"test_{uuid4().hex}.db"
     shutil.copyfile(TEST_TEMPLATE_DB, db_path)
     return db_path
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    tmp_root = TEST_TEMP_ROOT / "tmp_path"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    temp_path = tmp_root / uuid4().hex
+    temp_path.mkdir(parents=True, exist_ok=False)
+    try:
+        yield temp_path
+    finally:
+        shutil.rmtree(temp_path, ignore_errors=True)
 
 
 def _ensure_blank_template_db() -> None:

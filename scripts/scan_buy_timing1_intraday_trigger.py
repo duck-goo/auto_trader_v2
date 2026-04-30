@@ -26,6 +26,7 @@ from broker.kis import KisBroker
 from config.loader import load_settings
 from logger import setup_logging
 from services import Timing1IntradayTriggerService
+from services.errors import MissingTiming1ConvergenceSignalsError
 from storage.db import get_connection
 from storage.migrations.runner import run_migrations
 from storage.repositories import SignalRepository
@@ -234,9 +235,12 @@ def main() -> int:
 
         return 0
 
+    except MissingTiming1ConvergenceSignalsError as exc:
+        _fail("scan", f"{type(exc).__name__}: {exc}")
+        return 4
     except Exception as exc:
         _fail("scan", f"{type(exc).__name__}: {exc}")
-        return 4 if "Timing1 convergence signals are missing" in str(exc) else 5
+        return 5
 
     finally:
         conn.close()

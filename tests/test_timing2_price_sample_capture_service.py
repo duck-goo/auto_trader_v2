@@ -248,6 +248,30 @@ def test_capture_rejects_snapshot_for_different_trade_date(conn):
     assert "trade_date mismatch" in str(result.candidates[0].reason)
 
 
+def test_capture_rejects_non_current_runtime_trade_date_before_broker_calls(conn):
+    signal_repo = SignalRepository(conn)
+    sample_repo = CurrentPriceSampleRepository(conn)
+    _record_setup_signal(conn, signal_repo, symbol="005930", trade_date="2026-04-16")
+
+    broker = _FakeBroker({"005930": _snapshot("005930")})
+    service = Timing2PriceSampleCaptureService(
+        broker=broker,
+        conn=conn,
+        signal_repo=signal_repo,
+        sample_repo=sample_repo,
+        now_fn=lambda: KST.localize(datetime(2026, 4, 17, 9, 0, 31)),
+    )
+
+    with pytest.raises(Exception, match="supports only the current KST trade_date"):
+        service.capture(trade_date="2026-04-16", write_samples=True)
+
+    assert broker.calls == []
+    assert sample_repo.list_for_symbol_and_date(
+        trade_date="2026-04-16",
+        symbol="005930",
+    ) == []
+
+
 def test_capture_requires_setup_signals(conn):
     service = Timing2PriceSampleCaptureService(
         broker=_FakeBroker(),

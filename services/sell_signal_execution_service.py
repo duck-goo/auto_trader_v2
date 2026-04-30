@@ -194,7 +194,12 @@ class SellSignalExecutionService:
     ) -> SellSignalExecutionResult:
         normalized_settings = settings.validated()
         normalized_limit = _require_positive_int("signal_limit", signal_limit)
-        executed_at = self._now_fn().astimezone(_KST).isoformat()
+        observed_now = self._now_fn().astimezone(_KST)
+        executed_at = observed_now.isoformat()
+        self._validate_runtime_trade_date(
+            trade_date=trade_date,
+            observed_at=observed_now,
+        )
 
         pending_candidates = self._load_pending_candidates(
             trade_date=trade_date,
@@ -372,6 +377,11 @@ class SellSignalExecutionService:
         list[SellTriggerSignalCandidate],
         list[tuple[SellTriggerSignalCandidate, SellTriggerSignalCandidate]],
     ]:
+        # Keep exactly one active sell candidate per symbol for one execution
+        # pass. This is intentionally conservative because the current sell
+        # order / fill import path links one submitted order to one source lot.
+        # Superseded lot-level signals remain pending and can be consumed in a
+        # later pass after the first lot is closed.
         primary_by_symbol: dict[str, SellTriggerSignalCandidate] = {}
         superseded: list[tuple[SellTriggerSignalCandidate, SellTriggerSignalCandidate]] = []
         ordered = sorted(
@@ -646,6 +656,19 @@ class SellSignalExecutionService:
                 f"Failed to place sell order for symbol={symbol}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+
+    @staticmethod
+    def _validate_runtime_trade_date(
+        *,
+        trade_date: str,
+        observed_at: datetime,
+    ) -> None:
+        runtime_trade_date = observed_at.astimezone(_KST).strftime("%Y-%m-%d")
+        if runtime_trade_date != trade_date:
+            raise ServiceError(
+                "Sell signal execution supports only the current KST trade_date: "
+                f"runtime_trade_date={runtime_trade_date}, trade_date={trade_date}"
+            )
 
     @staticmethod
     def _build_blocked_candidate(

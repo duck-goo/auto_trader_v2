@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from unittest.mock import MagicMock
 
+import pytest
 import pytz
 
 from broker.kis.models import Balance, OrderInfo, OrderSide, OrderStatus, OrderType, PriceSnapshot
@@ -23,6 +24,7 @@ from services import (
     TradingRiskGuardService,
 )
 from services.buy_signal_execution_service import STRATEGY_NAME_BUY_EXECUTION_AUDIT
+from services.errors import ServiceError
 from storage.db import get_connection, transaction
 from storage.migrations.runner import run_migrations
 from storage.repositories import (
@@ -44,6 +46,10 @@ TRADE_DATE = "2026-04-16"
 
 def _fixed_now() -> datetime:
     return KST.localize(datetime(2026, 4, 16, 9, 30, 0))
+
+
+def _fixed_next_day_now() -> datetime:
+    return KST.localize(datetime(2026, 4, 17, 9, 30, 0))
 
 
 def _make_balance() -> Balance:
@@ -145,6 +151,7 @@ def _make_service(
     broker: MagicMock,
     order_service: MagicMock,
     entry_lot_repo: EntryLotRepository | None = None,
+    now_fn=_fixed_now,
 ) -> BuySignalExecutionService:
     return BuySignalExecutionService(
         broker=broker,
@@ -157,10 +164,10 @@ def _make_service(
             order_repo=order_repo,
             trading_control_repo=TradingControlRepository(conn),
             daily_stats_repo=DailyStatsRepository(conn),
-            now_fn=_fixed_now,
+            now_fn=now_fn,
         ),
         entry_lot_repo=entry_lot_repo,
-        now_fn=_fixed_now,
+        now_fn=now_fn,
     )
 
 
@@ -694,6 +701,298 @@ def test_execute_blocks_when_unresolved_buy_order_exists(test_db_path):
         conn.close()
 
 
+def test_execute_consumes_superseded_same_symbol_buy_signal(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+
+        morning_signal_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T09:01:00+09:00",
+        )
+        range_signal_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T10:00:30+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_balance.return_value = _make_balance()
+        broker.get_current_price.return_value = _make_price_snapshot("005930")
+
+        order_service = MagicMock(spec=OrderService)
+        order_service.place_order.return_value = _make_order_result("005930")
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=True,
+        )
+
+        assert result.pending_signal_count == 2
+        assert result.candidate_count == 2
+        assert result.submitted_count == 1
+        assert result.blocked_count == 1
+        assert result.acted_count == 2
+        assert result.audit_record_count == 2
+
+        winner = next(
+            item
+            for item in result.candidates
+            if item.outcome == BuySignalExecutionOutcome.SUBMITTED
+        )
+        superseded = next(
+            item
+            for item in result.candidates
+            if item.outcome == BuySignalExecutionOutcome.BLOCKED
+        )
+
+        assert winner.source_strategy_name == STRATEGY_NAME_TIMING2_30S_MORNING_TRIGGER
+        assert superseded.source_strategy_name == STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER
+        assert superseded.reason_code == "SUPERSEDED_BY_HIGHER_PRIORITY"
+
+        assert signal_repo.get(morning_signal_id).acted is True
+        assert signal_repo.get(range_signal_id).acted is True
+
+        broker.get_balance.assert_called_once()
+        broker.get_current_price.assert_called_once_with("005930")
+        order_service.place_order.assert_called_once()
+
+        audit_rows = signal_repo.list_by_strategy(
+            STRATEGY_NAME_BUY_EXECUTION_AUDIT,
+            limit=10,
+        )
+        assert len(audit_rows) == 2
+        audit_by_signal_id = {
+            row.payload["source_signal_id"]: row.payload for row in audit_rows
+        }
+        assert audit_by_signal_id[morning_signal_id]["execution_outcome"] == "SUBMITTED"
+        assert audit_by_signal_id[range_signal_id]["execution_outcome"] == "BLOCKED"
+        assert (
+            audit_by_signal_id[range_signal_id]["reason_code"]
+            == "SUPERSEDED_BY_HIGHER_PRIORITY"
+        )
+    finally:
+        conn.close()
+
+
+def test_execute_prefers_timing1_and_consumes_timing2_same_symbol_signal(
+    test_db_path,
+):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+
+        timing2_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T09:10:00+09:00",
+        )
+        timing1_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T09:11:00+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_balance.return_value = _make_balance()
+        broker.get_current_price.return_value = _make_price_snapshot("005930")
+
+        order_service = MagicMock(spec=OrderService)
+        order_service.place_order.return_value = _make_order_result("005930")
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=True,
+        )
+
+        assert result.pending_signal_count == 2
+        assert result.candidate_count == 2
+        assert result.submitted_count == 1
+        assert result.blocked_count == 1
+        assert result.acted_count == 2
+        assert result.audit_record_count == 2
+
+        winner = next(
+            item
+            for item in result.candidates
+            if item.outcome == BuySignalExecutionOutcome.SUBMITTED
+        )
+        superseded = next(
+            item
+            for item in result.candidates
+            if item.outcome == BuySignalExecutionOutcome.BLOCKED
+        )
+
+        assert winner.source_strategy_name == STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER
+        assert superseded.source_strategy_name == STRATEGY_NAME_TIMING2_INTRADAY_TRIGGER
+        assert superseded.reason_code == "SUPERSEDED_BY_HIGHER_PRIORITY"
+
+        assert signal_repo.get(timing1_id).acted is True
+        assert signal_repo.get(timing2_id).acted is True
+
+        broker.get_balance.assert_called_once()
+        broker.get_current_price.assert_called_once_with("005930")
+        order_service.place_order.assert_called_once()
+        assert (
+            order_service.place_order.call_args.kwargs["strategy_name"]
+            == STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER
+        )
+
+        audit_rows = signal_repo.list_by_strategy(
+            STRATEGY_NAME_BUY_EXECUTION_AUDIT,
+            limit=10,
+        )
+        assert len(audit_rows) == 2
+        audit_by_signal_id = {
+            row.payload["source_signal_id"]: row.payload for row in audit_rows
+        }
+        assert audit_by_signal_id[timing1_id]["execution_outcome"] == "SUBMITTED"
+        assert (
+            audit_by_signal_id[timing2_id]["execution_outcome"] == "BLOCKED"
+        )
+        assert (
+            audit_by_signal_id[timing2_id]["reason_code"]
+            == "SUPERSEDED_BY_HIGHER_PRIORITY"
+        )
+    finally:
+        conn.close()
+
+
+def test_execute_prefers_timing1_and_consumes_timing2_30s_same_symbol_signal(
+    test_db_path,
+):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+
+        timing2_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T10:00:30+09:00",
+        )
+        timing1_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T10:00:31+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_balance.return_value = _make_balance()
+        broker.get_current_price.return_value = _make_price_snapshot("005930")
+
+        order_service = MagicMock(spec=OrderService)
+        order_service.place_order.return_value = _make_order_result("005930")
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(),
+            execute_orders=True,
+        )
+
+        assert result.pending_signal_count == 2
+        assert result.candidate_count == 2
+        assert result.submitted_count == 1
+        assert result.blocked_count == 1
+        assert result.acted_count == 2
+        assert result.audit_record_count == 2
+
+        winner = next(
+            item
+            for item in result.candidates
+            if item.outcome == BuySignalExecutionOutcome.SUBMITTED
+        )
+        superseded = next(
+            item
+            for item in result.candidates
+            if item.outcome == BuySignalExecutionOutcome.BLOCKED
+        )
+
+        assert winner.source_strategy_name == STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER
+        assert superseded.source_strategy_name == STRATEGY_NAME_TIMING2_30S_RANGE_TRIGGER
+        assert superseded.reason_code == "SUPERSEDED_BY_HIGHER_PRIORITY"
+
+        assert signal_repo.get(timing1_id).acted is True
+        assert signal_repo.get(timing2_id).acted is True
+
+        broker.get_balance.assert_called_once()
+        broker.get_current_price.assert_called_once_with("005930")
+        order_service.place_order.assert_called_once()
+        assert (
+            order_service.place_order.call_args.kwargs["strategy_name"]
+            == STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER
+        )
+
+        audit_rows = signal_repo.list_by_strategy(
+            STRATEGY_NAME_BUY_EXECUTION_AUDIT,
+            limit=10,
+        )
+        assert len(audit_rows) == 2
+        audit_by_signal_id = {
+            row.payload["source_signal_id"]: row.payload for row in audit_rows
+        }
+        assert audit_by_signal_id[timing1_id]["execution_outcome"] == "SUBMITTED"
+        assert (
+            audit_by_signal_id[timing2_id]["execution_outcome"] == "BLOCKED"
+        )
+        assert (
+            audit_by_signal_id[timing2_id]["reason_code"]
+            == "SUPERSEDED_BY_HIGHER_PRIORITY"
+        )
+    finally:
+        conn.close()
+
+
 def test_preview_blocks_when_kill_switch_enabled(test_db_path):
     run_migrations(test_db_path)
     conn = get_connection(test_db_path)
@@ -851,5 +1150,60 @@ def test_preview_blocks_when_max_daily_loss_reached(test_db_path):
         assert blocked.reason_code == "MAX_DAILY_LOSS_REACHED"
         broker.get_balance.assert_not_called()
         broker.get_current_price.assert_not_called()
+    finally:
+        conn.close()
+
+
+def test_execute_rejects_non_current_runtime_trade_date_before_broker_calls(
+    test_db_path,
+):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+
+        signal_id = _record_trigger_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_TIMING1_INTRADAY_TRIGGER,
+            symbol="005930",
+            signal_at="2026-04-16T09:13:00+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_balance.return_value = _make_balance()
+        broker.get_current_price.return_value = _make_price_snapshot("005930")
+        order_service = MagicMock(spec=OrderService)
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+            now_fn=_fixed_next_day_now,
+        )
+
+        with pytest.raises(
+            ServiceError,
+            match="Buy signal execution supports only the current KST trade_date",
+        ):
+            service.execute_pending_signals(
+                trade_date=TRADE_DATE,
+                settings=_settings(),
+                execute_orders=True,
+            )
+
+        assert signal_repo.get(signal_id).acted is False
+        assert signal_repo.list_by_strategy(
+            STRATEGY_NAME_BUY_EXECUTION_AUDIT,
+            limit=10,
+        ) == []
+        broker.get_balance.assert_not_called()
+        broker.get_current_price.assert_not_called()
+        order_service.place_order.assert_not_called()
     finally:
         conn.close()
