@@ -3,7 +3,7 @@ Build one frontend-ready dashboard snapshot from ops artifacts.
 
 Inputs:
 - daily_ops_report.json created by show_daily_ops_report.py
-- daily_ops_check.json created by run_daily_ops_check.py
+- daily_ops_check.json or daily_ops_check.preview.json created by run_daily_ops_check.py
 - latest rehearsal_summary.json created by run_mock_operational_rehearsal.py
 
 Safety:
@@ -36,6 +36,7 @@ from strategy import (
 KST = pytz.timezone("Asia/Seoul")
 BUY_STRATEGY_SELECTION_FILE = "buy_strategy.selection.json"
 DAILY_OPS_CHECK_FILE = "daily_ops_check.json"
+DAILY_OPS_CHECK_PREVIEW_FILE = "daily_ops_check.preview.json"
 
 
 def _section(title: str) -> None:
@@ -117,6 +118,18 @@ def _resolve_daily_report_path(args: argparse.Namespace, ops_dir: Path) -> Path:
     if args.daily_report_input:
         return _resolve_path(args.daily_report_input)
     return ops_dir / "daily_ops_report.json"
+
+
+def _resolve_daily_ops_check_path(ops_dir: Path) -> Path:
+    default_path = ops_dir / DAILY_OPS_CHECK_FILE
+    if default_path.exists():
+        return default_path
+
+    preview_path = ops_dir / DAILY_OPS_CHECK_PREVIEW_FILE
+    if preview_path.exists():
+        return preview_path
+
+    return default_path
 
 
 def _optional_text(value: Any) -> str | None:
@@ -231,6 +244,13 @@ def _extract_symbol_hint(text: Any) -> str | None:
         suffix = normalized.split(marker, 1)[1].strip()
         return suffix or None
     return None
+
+
+def _extract_file_name(path_value: Any) -> str | None:
+    normalized = _optional_text(path_value)
+    if normalized is None:
+        return None
+    return Path(normalized).name or None
 
 
 def _build_overview(report: dict[str, Any] | None) -> dict[str, Any]:
@@ -456,6 +476,33 @@ def _build_recovery_row(row: dict[str, Any]) -> dict[str, Any]:
         "status_level": row.get("status_level"),
         "highest_severity": row.get("highest_severity"),
         "manual_recovery_required_count": row.get("manual_recovery_required_count"),
+        "stale_signal_preview_ready_count": row.get("stale_signal_preview_ready_count"),
+        "stale_signal_cleaned_count": row.get("stale_signal_cleaned_count"),
+        "stale_signal_blocked_count": row.get("stale_signal_blocked_count"),
+        "stale_signal_symbol_hint": row.get("stale_signal_symbol_hint"),
+        "stale_signal_blocked_reason_codes": row.get(
+            "stale_signal_blocked_reason_codes"
+        ),
+        "attention_flags": _coerce_attention_flags(row.get("attention_flags")),
+    }
+
+
+def _build_stale_signal_cleanup_review_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "available": bool(row.get("exists")),
+        "status_level": row.get("status_level"),
+        "highest_severity": row.get("highest_severity"),
+        "path": row.get("path"),
+        "review_file_name": _extract_file_name(row.get("path")),
+        "source_label": row.get("source_label"),
+        "source_path": row.get("source_path"),
+        "source_file_name": row.get("source_file_name"),
+        "review_item_count": row.get("review_item_count"),
+        "blocked_item_count": row.get("blocked_item_count"),
+        "preview_ready_item_count": row.get("preview_ready_item_count"),
+        "cleaned_item_count": row.get("cleaned_item_count"),
+        "top_symbols": row.get("top_symbols"),
+        "preview_items": row.get("preview_items"),
         "attention_flags": _coerce_attention_flags(row.get("attention_flags")),
     }
 
@@ -647,6 +694,12 @@ def _build_recovery_section(report: dict[str, Any] | None) -> dict[str, Any]:
         "order_maintenance_execute": _with_card_key(
             _build_recovery_row(_artifact_row(artifacts, "order_maintenance_execute")),
             "recovery-maintenance-execute",
+        ),
+        "stale_signal_cleanup_review": _with_card_key(
+            _build_stale_signal_cleanup_review_row(
+                _artifact_row(artifacts, "stale_signal_cleanup_review")
+            ),
+            "recovery-stale-signal-review",
         ),
         "execution_recovery_review": _with_card_key(
             {
@@ -946,7 +999,7 @@ def build_dashboard_snapshot_document(
     resolved_daily_ops_check_path = (
         _resolve_optional_path(daily_check_input)
         if daily_check_input is not None
-        else resolved_ops_dir / DAILY_OPS_CHECK_FILE
+        else _resolve_daily_ops_check_path(resolved_ops_dir)
     )
     resolved_rehearsal_path = (
         _resolve_optional_path(rehearsal_input)

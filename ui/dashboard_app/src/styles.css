@@ -406,6 +406,12 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: flex-start;
+}
+
+.info-card-action-groups {
+  display: grid;
+  gap: 8px;
 }
 
 .source-current-detail-filename {
@@ -427,6 +433,7 @@ pre {
   font-weight: 800;
   line-height: 1.2;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .source-detail-copy-button:hover,
@@ -599,6 +606,13 @@ pre {
 .secondary-button-subdued:focus-visible {
   border-color: rgba(23, 51, 50, 0.14);
   background: rgba(255, 255, 255, 0.42);
+}
+
+.secondary-button-compact {
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .danger-button {
@@ -1056,10 +1070,186 @@ pre {
   word-break: break-word;
 }
 
+.pair-badge-list {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pair-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(23, 51, 50, 0.08);
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.pair-badge[title],
+.pair-key[title],
+.info-card-header-badge[title],
+.review-item-summary-badge[title],
+.review-item-main span[title],
+.review-item-meta span[title],
+.pair-value[title] {
+  cursor: help;
+}
+
+.pair-badge-overflow {
+  background: rgba(23, 51, 50, 0.14);
+  color: var(--ink-soft);
+}
+
 .flag-list {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.info-card-header-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.info-card-header-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.info-card-header-badge-critical {
+  color: var(--critical);
+  background: rgba(183, 55, 70, 0.12);
+}
+
+.info-card-header-badge-warning {
+  color: var(--warning);
+  background: rgba(193, 107, 16, 0.14);
+}
+
+.info-card-header-badge-ready {
+  color: var(--ready);
+  background: rgba(24, 116, 84, 0.12);
+}
+
+.info-card-header-badge-neutral {
+  color: var(--ink-soft);
+  background: rgba(23, 51, 50, 0.08);
+}
+
+.review-item-block {
+  display: grid;
+  gap: 8px;
+}
+
+.review-item-title {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.review-item-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.review-item-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(23, 51, 50, 0.08);
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.review-item-list {
+  display: grid;
+  gap: 8px;
+}
+
+.review-item-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(23, 51, 50, 0.08);
+  background: rgba(23, 51, 50, 0.04);
+}
+
+.review-item-row-blocked {
+  border-color: rgba(183, 55, 70, 0.22);
+  background: rgba(183, 55, 70, 0.06);
+}
+
+.review-item-row-preview-ready {
+  border-color: rgba(193, 107, 16, 0.22);
+  background: rgba(193, 107, 16, 0.06);
+}
+
+.review-item-row-cleaned {
+  border-color: rgba(24, 116, 84, 0.2);
+  background: rgba(24, 116, 84, 0.06);
+}
+
+.review-item-main,
+.review-item-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.review-item-main span,
+.review-item-meta span {
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
+.review-item-outcome-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.review-item-outcome-badge-blocked {
+  color: var(--critical);
+  background: rgba(183, 55, 70, 0.12);
+}
+
+.review-item-outcome-badge-preview-ready {
+  color: var(--warning);
+  background: rgba(193, 107, 16, 0.14);
+}
+
+.review-item-outcome-badge-cleaned {
+  color: var(--ready);
+  background: rgba(24, 116, 84, 0.12);
+}
+
+.review-item-outcome-badge-neutral {
+  color: var(--ink-soft);
+  background: rgba(23, 51, 50, 0.08);
 }
 
 .flag-pill {
@@ -1231,6 +1421,11 @@ pre {
     text-align: center;
   }
 
+  .info-card-action-groups .secondary-button-compact {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
   .card-grid,
   .metric-grid,
   .kill-switch-layout,
@@ -1244,5 +1439,9 @@ pre {
 
   .pair-value {
     text-align: left;
+  }
+
+  .pair-badge-list {
+    justify-content: flex-start;
   }
 }

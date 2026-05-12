@@ -200,10 +200,14 @@ def _create_timing2_lot(
     return lot.id
 
 
-def _settings() -> SellSignalExecutionSettings:
+def _settings(
+    *,
+    max_signal_age_seconds: int | None = None,
+) -> SellSignalExecutionSettings:
     return SellSignalExecutionSettings(
         start_time="09:00:00",
         cutoff_time="15:20:00",
+        max_signal_age_seconds=max_signal_age_seconds,
     )
 
 
@@ -808,5 +812,127 @@ def test_execute_rejects_non_current_runtime_trade_date_before_broker_calls(
         ) == []
         broker.get_current_price.assert_not_called()
         order_service.place_order.assert_not_called()
+    finally:
+        conn.close()
+
+
+def test_execute_blocks_stale_same_day_sell_signal_and_consumes_it(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+
+        with transaction(conn):
+            position_repo.upsert_from_broker(
+                symbol="005930",
+                qty=5,
+                avg_price=100_000,
+                updated_at="2026-04-17T09:00:00+09:00",
+            )
+
+        signal_id = _record_sell_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_SELL_STOP_LOSS,
+            symbol="005930",
+            signal_at="2026-04-17T10:00:00+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_current_price.return_value = _make_price_snapshot("005930", 97_000)
+        order_service = MagicMock(spec=OrderService)
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(max_signal_age_seconds=300),
+            execute_orders=True,
+        )
+
+        assert result.blocked_count == 1
+        assert result.acted_count == 1
+        assert result.audit_record_count == 1
+        assert result.candidates[0].reason_code == "STALE_SIGNAL_AGE_EXCEEDED"
+        assert signal_repo.get(signal_id).acted is True
+
+        audit_rows = signal_repo.list_by_strategy(
+            STRATEGY_NAME_SELL_EXECUTION_AUDIT,
+            limit=10,
+        )
+        assert len(audit_rows) == 1
+        assert audit_rows[0].payload["source_signal_id"] == signal_id
+        assert audit_rows[0].payload["reason_code"] == "STALE_SIGNAL_AGE_EXCEEDED"
+        assert audit_rows[0].payload["source_signal_scanned_at"] == (
+            "2026-04-17T10:00:00+09:00"
+        )
+        assert audit_rows[0].payload["max_signal_age_seconds"] == 300
+
+        broker.get_current_price.assert_not_called()
+        order_service.place_order.assert_not_called()
+    finally:
+        conn.close()
+
+
+def test_execute_allows_fresh_sell_signal_with_signal_age_guard(test_db_path):
+    run_migrations(test_db_path)
+    conn = get_connection(test_db_path)
+    try:
+        signal_repo = SignalRepository(conn)
+        order_repo = OrderRepository(conn)
+        position_repo = PositionRepository(conn)
+
+        with transaction(conn):
+            position_repo.upsert_from_broker(
+                symbol="035420",
+                qty=7,
+                avg_price=100_000,
+                updated_at="2026-04-17T09:00:00+09:00",
+            )
+
+        signal_id = _record_sell_signal(
+            conn,
+            signal_repo,
+            strategy_name=STRATEGY_NAME_SELL_STOP_LOSS,
+            symbol="035420",
+            signal_at="2026-04-17T10:08:30+09:00",
+        )
+
+        broker = MagicMock()
+        broker.get_current_price.return_value = _make_price_snapshot("035420", 96_000)
+        order_service = MagicMock(spec=OrderService)
+        order_service.place_order.return_value = _make_order_result("035420", qty=7)
+
+        service = _make_service(
+            conn=conn,
+            signal_repo=signal_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            broker=broker,
+            order_service=order_service,
+        )
+
+        result = service.execute_pending_signals(
+            trade_date=TRADE_DATE,
+            settings=_settings(max_signal_age_seconds=300),
+            execute_orders=True,
+        )
+
+        assert result.submitted_count == 1
+        assert result.acted_count == 1
+        assert result.audit_record_count == 1
+        assert result.candidates[0].reason_code is None
+        assert signal_repo.get(signal_id).acted is True
+        broker.get_current_price.assert_called_once_with("035420")
+        order_service.place_order.assert_called_once()
     finally:
         conn.close()

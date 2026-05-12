@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from services import (
     MarketMasterValidationCount,
@@ -13,6 +14,7 @@ from services import (
     Timing1SetupScanResult,
     Timing2SetupScanCandidate,
     Timing2SetupScanResult,
+    UniverseBuildOutcome,
 )
 from strategy import (
     Timing1SetupMatch,
@@ -335,3 +337,99 @@ def test_timing2_setup_scan_result_to_payload_has_expected_shape():
     assert payload["candidates"][0]["symbol"] == "005930"
     assert payload["candidates"][0]["match"]["lookback_highest_close"] == 150000
     assert payload["candidates"][0]["match"]["volume_ratio"] == 5.0
+
+
+def test_run_timing2_setup_scan_returns_scanned_result_with_expected_settings(
+    monkeypatch,
+):
+    module = _load_script_module()
+    captured: dict[str, object] = {}
+
+    fake_scan_result = Timing2SetupScanResult(
+        trade_date="2026-04-15",
+        scanned_at="2026-04-15T08:50:00+09:00",
+        universe_count=2,
+        matched_count=1,
+        recorded_count=1,
+        skipped_existing_count=0,
+        candidates=(
+            Timing2SetupScanCandidate(
+                symbol="005930",
+                name="Samsung Electronics",
+                market="KOSPI",
+                already_recorded=False,
+                match=Timing2SetupMatch(
+                    symbol="005930",
+                    market="KOSPI",
+                    evaluation_trade_date="2026-04-15",
+                    latest_daily_date="2026-04-14",
+                    latest_close=150000,
+                    previous_close=129500,
+                    latest_volume=500000,
+                    previous_volume=100000,
+                    close_gain_rate=0.158301,
+                    volume_ratio=5.0,
+                    lookback_highest_close=150000,
+                    lookback_start_date="2026-01-14",
+                    lookback_end_date="2026-04-14",
+                ),
+            ),
+        ),
+        recorded_signals=(),
+    )
+
+    class FakeTiming2SetupScanService:
+        def __init__(self, *, broker, conn, universe_repo, signal_repo) -> None:
+            captured["broker"] = broker
+            captured["conn"] = conn
+            captured["universe_repo_type"] = type(universe_repo).__name__
+            captured["signal_repo_type"] = type(signal_repo).__name__
+
+        def scan(self, *, trade_date, settings, daily_count, write_signals):
+            captured["trade_date"] = trade_date
+            captured["settings"] = settings
+            captured["daily_count"] = daily_count
+            captured["write_signals"] = write_signals
+            return fake_scan_result
+
+    monkeypatch.setattr(
+        module,
+        "Timing2SetupScanService",
+        FakeTiming2SetupScanService,
+    )
+
+    readiness_result = SimpleNamespace(
+        preopen_universe_result=SimpleNamespace(
+            universe_build_result=SimpleNamespace(
+                outcome=UniverseBuildOutcome.SAVED,
+                refresh_result=SimpleNamespace(candidate_count=2),
+            )
+        )
+    )
+
+    result = module._run_timing2_setup_scan(
+        scan_requested=True,
+        write_signals=True,
+        broker=object(),
+        conn=object(),
+        readiness_result=readiness_result,
+        trade_date="2026-04-15",
+        daily_count=90,
+        close_high_lookback_days=60,
+        close_gain_rate_threshold=0.15,
+        volume_multiplier_threshold=5.0,
+    )
+
+    assert result.outcome == module.Timing2SetupScanOutcome.SCANNED
+    assert result.reason is None
+    assert result.scan_result is fake_scan_result
+    assert captured["trade_date"] == "2026-04-15"
+    assert captured["daily_count"] == 90
+    assert captured["write_signals"] is True
+    assert captured["universe_repo_type"] == "UniverseCandidateRepository"
+    assert captured["signal_repo_type"] == "SignalRepository"
+
+    settings = captured["settings"]
+    assert settings.close_high_lookback_days == 60
+    assert settings.close_gain_rate_threshold == 0.15
+    assert settings.volume_multiplier_threshold == 5.0

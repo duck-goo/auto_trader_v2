@@ -255,6 +255,31 @@ class SignalRepository:
         ).fetchall()
         return RowMapper.map_many(rows, SignalRow, converters=_ROW_CONVERTERS)
 
+    def list_unacted_by_strategies(
+        self,
+        strategy_names: list[str] | tuple[str, ...] | frozenset[str],
+        *,
+        limit: int = 100,
+    ) -> list[SignalRow]:
+        limit = require_positive_int("limit", limit)
+        normalized_strategy_names = self._normalize_strategy_names(strategy_names)
+        if not normalized_strategy_names:
+            return []
+
+        placeholders = ", ".join("?" for _ in normalized_strategy_names)
+        rows = self._conn.execute(
+            f"""
+            SELECT {_SELECT_COLUMNS}
+            FROM signals
+            WHERE acted = 0
+              AND strategy_name IN ({placeholders})
+            ORDER BY scanned_at ASC, id ASC
+            LIMIT ?
+            """,
+            (*normalized_strategy_names, limit),
+        ).fetchall()
+        return RowMapper.map_many(rows, SignalRow, converters=_ROW_CONVERTERS)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -265,3 +290,22 @@ class SignalRepository:
                 f"Signal row expected but not found: id={signal_id!r}"
             )
         return row
+
+    def _normalize_strategy_names(
+        self,
+        strategy_names: list[str] | tuple[str, ...] | frozenset[str],
+    ) -> tuple[str, ...]:
+        if not isinstance(strategy_names, (list, tuple, frozenset)):
+            raise ValueError(
+                "strategy_names must be a list, tuple, or frozenset of strings."
+            )
+
+        normalized_names: list[str] = []
+        seen_names: set[str] = set()
+        for raw_name in strategy_names:
+            strategy_name = require_non_empty_text("strategy_name", raw_name)
+            if strategy_name in seen_names:
+                continue
+            normalized_names.append(strategy_name)
+            seen_names.add(strategy_name)
+        return tuple(normalized_names)

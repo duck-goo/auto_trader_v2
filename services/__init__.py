@@ -133,6 +133,15 @@ from services.stale_sell_order_cancel_service import (
     StaleSellOrderCancelService,
     StaleSellOrderCancelSettings,
 )
+from services.stale_execution_signal_cleanup_service import (
+    STRATEGY_NAME_STALE_BUY_SIGNAL_CLEANUP_AUDIT,
+    STRATEGY_NAME_STALE_SELL_SIGNAL_CLEANUP_AUDIT,
+    StaleExecutionSignalCleanupCandidate,
+    StaleExecutionSignalCleanupOutcome,
+    StaleExecutionSignalCleanupResult,
+    StaleExecutionSignalCleanupService,
+    StaleExecutionSignalCleanupSettings,
+)
 from services.unresolved_order_sync_service import (
     UnresolvedOrderSyncAction,
     UnresolvedOrderSyncCandidate,
@@ -369,6 +378,13 @@ __all__ = [
     "StaleSellOrderCancelResult",
     "StaleSellOrderCancelService",
     "StaleSellOrderCancelSettings",
+    "STRATEGY_NAME_STALE_BUY_SIGNAL_CLEANUP_AUDIT",
+    "STRATEGY_NAME_STALE_SELL_SIGNAL_CLEANUP_AUDIT",
+    "StaleExecutionSignalCleanupCandidate",
+    "StaleExecutionSignalCleanupOutcome",
+    "StaleExecutionSignalCleanupResult",
+    "StaleExecutionSignalCleanupService",
+    "StaleExecutionSignalCleanupSettings",
     "UnresolvedOrderSyncAction",
     "UnresolvedOrderSyncCandidate",
     "UnresolvedOrderSyncOutcome",

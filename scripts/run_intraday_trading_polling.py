@@ -44,6 +44,7 @@ from services import (
     SellSignalExecutionSettings,
     StaleBuyOrderCancelService,
     StaleBuyOrderCancelSettings,
+    StaleExecutionSignalCleanupService,
     StaleSellOrderCancelService,
     Timing2PriceSampleCaptureService,
     Timing2SetupSignalReadiness,
@@ -277,6 +278,15 @@ def _parse_args() -> argparse.Namespace:
         help="Buy execution cutoff time HH:MM:SS. Default: 12:00:00",
     )
     parser.add_argument(
+        "--buy-max-signal-age-seconds",
+        type=int,
+        default=300,
+        help=(
+            "Max allowed age for pending buy signals before execution. "
+            "Default: 300"
+        ),
+    )
+    parser.add_argument(
         "--sell-start-time",
         default="09:00:00",
         help="Sell execution start time HH:MM:SS. Default: 09:00:00",
@@ -285,6 +295,15 @@ def _parse_args() -> argparse.Namespace:
         "--sell-cutoff-time",
         default="15:20:00",
         help="Sell execution cutoff time HH:MM:SS. Default: 15:20:00",
+    )
+    parser.add_argument(
+        "--sell-max-signal-age-seconds",
+        type=int,
+        default=300,
+        help=(
+            "Max allowed age for pending sell signals before execution. "
+            "Default: 300"
+        ),
     )
     parser.add_argument(
         "--timing1-start-time",
@@ -488,13 +507,45 @@ def _serialize_cycle_step(step) -> dict[str, Any]:
     }
 
 
+def _serialize_maintenance_step(step) -> dict[str, Any]:
+    if step.result is None:
+        summary = None
+    else:
+        result = step.result
+        summary = {
+            "sync_candidate_count": result.sync_result.candidate_count,
+            "sync_synced_count": result.sync_result.synced_count,
+            "recovered_count": result.execution_recovery_result.recovered_count,
+            "manual_recovery_required_count": len(
+                result.manual_recovery_required_client_order_ids
+            ),
+            "buy_cancelled_count": result.stale_buy_cancel_result.cancelled_count,
+            "sell_cancelled_count": result.stale_sell_cancel_result.cancelled_count,
+            "buy_signal_cleaned_count": (
+                None
+                if result.stale_buy_signal_cleanup_result is None
+                else result.stale_buy_signal_cleanup_result.cleaned_count
+            ),
+            "sell_signal_cleaned_count": (
+                None
+                if result.stale_sell_signal_cleanup_result is None
+                else result.stale_sell_signal_cleanup_result.cleaned_count
+            ),
+        }
+    return {
+        "outcome": step.outcome,
+        "reason": step.reason,
+        "summary": summary,
+    }
+
+
 def _build_cycle_payload(cycle_no: int, result) -> dict[str, Any]:
     return {
         "cycle_no": cycle_no,
         "trade_date": result.trade_date,
         "execute_actions": result.execute_actions,
         "record_scan_signals": result.record_scan_signals,
-        "maintenance": _serialize_cycle_step(result.maintenance),
+        "maintenance": _serialize_maintenance_step(result.maintenance),
         "intraday_bar_refresh": _serialize_cycle_step(result.intraday_bar_refresh),
         "timing2_price_sample_capture": _serialize_cycle_step(
             result.timing2_price_sample_capture
@@ -617,6 +668,14 @@ def main() -> int:
         _validate_positive_int("per_order_budget", args.per_order_budget)
         _validate_positive_int("max_holdings", args.max_holdings)
         _validate_positive_int(
+            "buy_max_signal_age_seconds",
+            args.buy_max_signal_age_seconds,
+        )
+        _validate_positive_int(
+            "sell_max_signal_age_seconds",
+            args.sell_max_signal_age_seconds,
+        )
+        _validate_positive_int(
             "sell_macd_history_limit",
             args.sell_macd_history_limit,
         )
@@ -643,10 +702,12 @@ def main() -> int:
             max_daily_loss=args.max_daily_loss,
             start_time=args.buy_start_time,
             cutoff_time=args.buy_cutoff_time,
+            max_signal_age_seconds=args.buy_max_signal_age_seconds,
         ).validated()
         sell_execution_settings = SellSignalExecutionSettings(
             start_time=args.sell_start_time,
             cutoff_time=args.sell_cutoff_time,
+            max_signal_age_seconds=args.sell_max_signal_age_seconds,
         ).validated()
         sell_exit_settings = SellExitSettings(
             stop_loss_ratio=args.sell_stop_loss_percent / 100.0,
@@ -852,6 +913,10 @@ def main() -> int:
                     stale_sell_cancel_service=StaleSellOrderCancelService(
                         order_repo=order_repo,
                         order_service=order_service,
+                    ),
+                    stale_signal_cleanup_service=StaleExecutionSignalCleanupService(
+                        conn=conn,
+                        signal_repo=signal_repo,
                     ),
                 ),
                 intraday_bar_refresh_service=IntradayBar15mRefreshService(

@@ -422,6 +422,111 @@ def test_main_forwards_buy_strategy_to_polling_and_payload(
     assert payload["run_timing2"] is True
 
 
+def test_main_preserves_timing2_preopen_and_polling_details_in_output(
+    test_db_path,
+    monkeypatch,
+):
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_timing2_payload.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=[
+            "--preopen-scan-timing2-setup",
+            "--preopen-write-timing2-signals",
+            "--buy-strategy",
+            "timing2",
+        ],
+    )
+
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(target, "load_settings", lambda: _make_settings(test_db_path))
+    monkeypatch.setattr(target, "setup_logging", lambda settings: None)
+    _install_fixed_tempdir(
+        monkeypatch,
+        test_db_path=test_db_path,
+        suffix="session_temp_timing2_payload",
+    )
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "prepare_preopen_universe.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "readiness_outcome": "READY",
+                    "readiness_reason": None,
+                    "timing2_setup_scan_outcome": "SCANNED",
+                    "timing2_setup_scan_reason": None,
+                    "timing2_setup_scan_result": {
+                        "trade_date": TRADE_DATE,
+                        "matched_count": 1,
+                        "recorded_count": 1,
+                    },
+                },
+            )
+            return 0
+        if script_name == "run_intraday_trading_polling.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "stop_reason": "MAX_CYCLES_REACHED",
+                    "timing2_setup_readiness": {
+                        "trade_date": TRADE_DATE,
+                        "required": True,
+                        "setup_signal_count": 1,
+                        "ready": True,
+                        "reason": None,
+                    },
+                    "cycles": [
+                        {
+                            "timing2_price_sample_capture": {
+                                "outcome": "COMPLETED"
+                            },
+                            "timing2_30s_bar_build": {
+                                "outcome": "COMPLETED"
+                            },
+                            "timing2_30s_trigger_scan": {
+                                "outcome": "COMPLETED"
+                            },
+                        }
+                    ],
+                },
+            )
+            return 0
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    assert [Path(command[1]).name for command in commands] == [
+        "prepare_preopen_universe.py",
+        "run_intraday_trading_polling.py",
+    ]
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["session_outcome"] == "COMPLETED"
+    assert payload["preopen_result"]["timing2_setup_scan_outcome"] == "SCANNED"
+    assert (
+        payload["preopen_result"]["timing2_setup_scan_result"]["matched_count"] == 1
+    )
+    assert (
+        payload["preopen_result"]["timing2_setup_scan_result"]["recorded_count"] == 1
+    )
+    assert payload["polling_result"]["timing2_setup_readiness"]["ready"] is True
+    assert (
+        payload["polling_result"]["timing2_setup_readiness"]["setup_signal_count"]
+        == 1
+    )
+
+
 def test_main_uses_saved_buy_strategy_when_cli_strategy_is_absent(
     test_db_path,
     monkeypatch,

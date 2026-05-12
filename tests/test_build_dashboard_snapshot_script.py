@@ -128,8 +128,56 @@ def test_main_builds_dashboard_snapshot_from_daily_report_and_latest_rehearsal(
                     "status_level": "WARNING",
                     "highest_severity": "WARNING",
                     "manual_recovery_required_count": 2,
+                    "stale_signal_preview_ready_count": 3,
+                    "stale_signal_cleaned_count": 0,
+                    "stale_signal_blocked_count": 0,
+                    "stale_signal_symbol_hint": "005930, 000660",
+                    "stale_signal_blocked_reason_codes": None,
                     "attention_flags": [
                         "MANUAL_RECOVERY_REQUIRED",
+                    ],
+                },
+                "stale_signal_cleanup_review": {
+                    "exists": True,
+                    "status_level": "WARNING",
+                    "highest_severity": "WARNING",
+                    "path": (
+                        "C:/python/auto_trader_v2/data/ops/test/"
+                        "stale_signal_cleanup.review.json"
+                    ),
+                    "source_label": "order_maintenance.execute",
+                    "source_path": (
+                        "C:/python/auto_trader_v2/data/ops/test/"
+                        "order_maintenance.execute.json"
+                    ),
+                    "source_file_name": "order_maintenance.execute.json",
+                    "review_item_count": 3,
+                    "blocked_item_count": 1,
+                    "preview_ready_item_count": 1,
+                    "cleaned_item_count": 1,
+                    "top_symbols": "005930, 000660",
+                    "preview_items": [
+                        {
+                            "scope": "buy",
+                            "symbol": "005930",
+                            "strategy_name": "buy_timing2_30s_morning_reclaim",
+                            "scanned_at": "2026-04-20T09:07:01+09:00",
+                            "outcome": "BLOCKED",
+                            "reason_code": "INVALID_SIGNAL_SCANNED_AT",
+                            "age_seconds": 421,
+                        },
+                        {
+                            "scope": "sell",
+                            "symbol": "000660",
+                            "strategy_name": "sell_stop_loss",
+                            "scanned_at": "2026-04-20T09:12:44+09:00",
+                            "outcome": "PREVIEW_READY",
+                            "reason_code": "STALE_SIGNAL_AGE_EXCEEDED",
+                            "age_seconds": 366,
+                        },
+                    ],
+                    "attention_flags": [
+                        "STALE_SIGNAL_CLEANUP_BLOCKED_ITEMS",
                     ],
                 },
             },
@@ -324,9 +372,63 @@ def test_main_builds_dashboard_snapshot_from_daily_report_and_latest_rehearsal(
         == 2
     )
     assert (
+        payload["recovery"]["order_maintenance_preview"][
+            "stale_signal_preview_ready_count"
+        ]
+        == 3
+    )
+    assert (
+        payload["recovery"]["order_maintenance_preview"]["stale_signal_symbol_hint"]
+        == "005930, 000660"
+    )
+    assert (
         payload["recovery"]["order_maintenance_preview"]["card_key"]
         == "recovery-maintenance-preview"
     )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["card_key"]
+        == "recovery-stale-signal-review"
+    )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["blocked_item_count"]
+        == 1
+    )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["source_label"]
+        == "order_maintenance.execute"
+    )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["path"]
+        == "C:/python/auto_trader_v2/data/ops/test/stale_signal_cleanup.review.json"
+    )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["review_file_name"]
+        == "stale_signal_cleanup.review.json"
+    )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["source_file_name"]
+        == "order_maintenance.execute.json"
+    )
+    assert payload["recovery"]["stale_signal_cleanup_review"]["preview_items"] == [
+        {
+            "scope": "buy",
+            "symbol": "005930",
+            "strategy_name": "buy_timing2_30s_morning_reclaim",
+            "scanned_at": "2026-04-20T09:07:01+09:00",
+            "outcome": "BLOCKED",
+            "reason_code": "INVALID_SIGNAL_SCANNED_AT",
+            "age_seconds": 421,
+        },
+        {
+            "scope": "sell",
+            "symbol": "000660",
+            "strategy_name": "sell_stop_loss",
+            "scanned_at": "2026-04-20T09:12:44+09:00",
+            "outcome": "PREVIEW_READY",
+            "reason_code": "STALE_SIGNAL_AGE_EXCEEDED",
+            "age_seconds": 366,
+        },
+    ]
     assert (
         payload["recovery"]["execution_recovery_review"]["card_key"]
         == "recovery-execution-review"
@@ -389,8 +491,183 @@ def test_main_writes_no_data_snapshot_when_sources_are_missing(
         payload["recovery"]["execution_recovery_review"]["card_key"]
         == "recovery-execution-review"
     )
+    assert (
+        payload["recovery"]["stale_signal_cleanup_review"]["card_key"]
+        == "recovery-stale-signal-review"
+    )
     assert payload["actions"]["required"] is False
     assert payload["actions"]["count"] == 0
+
+
+def test_main_uses_preview_daily_ops_check_when_default_daily_ops_check_is_missing(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_dashboard_snapshot_preview_daily_ops"
+    )
+    output_path = ops_dir / "dashboard_snapshot.json"
+
+    _write_json(
+        ops_dir / "daily_ops_report.json",
+        {
+            "trade_date": "2026-04-20",
+            "artifact_count": 1,
+            "report_outcome": "READY",
+            "health_outcome": "READY",
+            "highest_severity": "NONE",
+            "attention_flags": [],
+            "action_items": [],
+            "alert": {
+                "critical_count": 0,
+                "warning_count": 0,
+            },
+            "artifacts": {
+                "trading_session_preview": {
+                    "exists": True,
+                    "status_level": "READY",
+                    "highest_severity": "NONE",
+                    "session_outcome": "COMPLETED",
+                    "session_reason": None,
+                    "attention_flags": [],
+                }
+            },
+        },
+    )
+
+    _write_json(
+        ops_dir / "daily_ops_check.preview.json",
+        {
+            "trade_date": "2026-04-20",
+            "overall_outcome": "READY",
+            "overall_reason": None,
+            "should_notify": False,
+            "operator_summary": {
+                "headline": "Preview looks ready.",
+                "detail": "No attention flags detected.",
+                "health_outcome": "READY",
+                "dispatch_outcome": "NOT_REQUIRED",
+                "primary_attention_flag": None,
+                "primary_action_code": None,
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--trade-date",
+            "2026-04-20",
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["sources"]["daily_ops_check_available"] is True
+    assert payload["sources"]["daily_ops_check_path"].endswith(
+        "daily_ops_check.preview.json"
+    )
+    assert payload["operator_summary"]["available"] is True
+    assert payload["operator_summary"]["source"] == "daily_ops_check"
+    assert payload["operator_summary"]["headline"] == "Preview looks ready."
+
+
+def test_main_preserves_timing2_zero_match_action_from_preview_daily_ops_check(
+    test_db_path,
+    monkeypatch,
+):
+    ops_dir = test_db_path.with_name(
+        f"{test_db_path.stem}_dashboard_snapshot_timing2_zero_match"
+    )
+    output_path = ops_dir / "dashboard_snapshot.json"
+
+    _write_json(
+        ops_dir / "daily_ops_report.json",
+        {
+            "trade_date": "2026-04-20",
+            "artifact_count": 1,
+            "report_outcome": "ATTENTION",
+            "health_outcome": "WARNING",
+            "highest_severity": "WARNING",
+            "attention_flags": ["TRADING_SESSION_PREVIEW_TIMING2_SETUP_NOT_READY"],
+            "action_items": [
+                {
+                    "action_code": "REVIEW_TIMING2_SETUP_ZERO_MATCH",
+                }
+            ],
+            "alert": {
+                "critical_count": 0,
+                "warning_count": 1,
+            },
+            "artifacts": {
+                "trading_session_preview": {
+                    "exists": True,
+                    "status_level": "WARNING",
+                    "highest_severity": "WARNING",
+                    "session_outcome": "COMPLETED",
+                    "session_reason": None,
+                    "attention_flags": [
+                        "TRADING_SESSION_PREVIEW_TIMING2_SETUP_NOT_READY"
+                    ],
+                }
+            },
+        },
+    )
+
+    _write_json(
+        ops_dir / "daily_ops_check.preview.json",
+        {
+            "trade_date": "2026-04-20",
+            "overall_outcome": "NOTIFICATION_REQUIRED",
+            "overall_reason": "health_outcome=WARNING meets min_level=WARNING",
+            "should_notify": True,
+            "operator_summary": {
+                "headline": "1 attention flags detected (0 critical, 1 warning).",
+                "detail": (
+                    "Timing2 setup scan ran normally, but no matching symbols were "
+                    "found for this trade date. Timing2 buys stayed disabled."
+                ),
+                "health_outcome": "WARNING",
+                "dispatch_outcome": "NOT_REQUIRED",
+                "primary_attention_flag": (
+                    "TRADING_SESSION_PREVIEW_TIMING2_SETUP_NOT_READY"
+                ),
+                "primary_action_code": "REVIEW_TIMING2_SETUP_ZERO_MATCH",
+            },
+        },
+    )
+
+    _set_cli_args(
+        monkeypatch,
+        [
+            "--trade-date",
+            "2026-04-20",
+            "--ops-dir",
+            str(ops_dir),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["sources"]["daily_ops_check_available"] is True
+    assert payload["operator_summary"]["source"] == "daily_ops_check"
+    assert (
+        payload["operator_summary"]["primary_action_code"]
+        == "REVIEW_TIMING2_SETUP_ZERO_MATCH"
+    )
+    assert payload["actions"]["top_action_codes"] == [
+        "REVIEW_TIMING2_SETUP_ZERO_MATCH"
+    ]
 
 
 def test_main_builds_operator_summary_from_daily_report_fallback_when_daily_check_missing(

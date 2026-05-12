@@ -113,6 +113,24 @@ test("maps manual recovery review to recovery review card", () => {
   ]);
 });
 
+test("maps stale cleanup review action to stale cleanup review card", () => {
+  const targets = buildOperatorJumpTargets({
+    primary_attention_flag: "STALE_SIGNAL_CLEANUP_BLOCKED_ITEMS",
+    primary_action_code: "REVIEW_STALE_SIGNAL_CLEANUP",
+  });
+
+  assert.deepEqual(projectTargets(targets), [
+    {
+      ...DASHBOARD_SECTION_TARGETS.recoveryStaleSignalCleanupReview,
+      group: OPERATOR_TARGET_GROUPS.PRIMARY,
+    },
+    {
+      ...DASHBOARD_SECTION_TARGETS.actions,
+      group: OPERATOR_TARGET_GROUPS.FALLBACK,
+    },
+  ]);
+});
+
 test("maps kill switch review to controls", () => {
   const targets = buildOperatorJumpTargets({
     primary_attention_flag: "KILL_SWITCH_ENABLED",

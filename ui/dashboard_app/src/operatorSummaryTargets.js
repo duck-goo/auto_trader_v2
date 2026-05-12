@@ -11,6 +11,7 @@ export const DASHBOARD_CARD_KEYS = {
   executionSellExecute: "execution-sell-execute",
   recoveryMaintenancePreview: "recovery-maintenance-preview",
   recoveryMaintenanceExecute: "recovery-maintenance-execute",
+  recoveryStaleSignalCleanupReview: "recovery-stale-signal-review",
   recoveryExecutionReview: "recovery-execution-review",
 };
 
@@ -87,9 +88,14 @@ export const DASHBOARD_SECTION_TARGETS = {
     label: "Maintenance Execute",
     cardKey: DASHBOARD_CARD_KEYS.recoveryMaintenanceExecute,
   }),
+  recoveryStaleSignalCleanupReview: createTarget({
+    sectionId: "recovery-and-maintenance",
+    label: "Stale Cleanup Review",
+    cardKey: DASHBOARD_CARD_KEYS.recoveryStaleSignalCleanupReview,
+  }),
   recoveryReview: createTarget({
     sectionId: "recovery-and-maintenance",
-    label: "Recovery Review",
+    label: "Manual Recovery Review",
     cardKey: DASHBOARD_CARD_KEYS.recoveryExecutionReview,
   }),
   actions: createTarget({
@@ -166,6 +172,12 @@ function resolveExecutionTarget(primaryFlag, primaryActionCode) {
 }
 
 function resolveRecoveryTarget(primaryFlag, primaryActionCode) {
+  if (
+    primaryFlag === "STALE_SIGNAL_CLEANUP_BLOCKED_ITEMS" ||
+    primaryActionCode === "REVIEW_STALE_SIGNAL_CLEANUP"
+  ) {
+    return DASHBOARD_SECTION_TARGETS.recoveryStaleSignalCleanupReview;
+  }
   if (includesToken(primaryFlag, "ORDER_MAINTENANCE_EXECUTE")) {
     return DASHBOARD_SECTION_TARGETS.recoveryMaintenanceExecute;
   }

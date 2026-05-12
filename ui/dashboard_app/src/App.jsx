@@ -11,6 +11,7 @@ import {
   buildSourceInfoJumpTarget,
   buildOperatorJumpTargets,
   DASHBOARD_CARD_KEYS,
+  DASHBOARD_SECTION_TARGETS,
   OPERATOR_TARGET_GROUPS,
   dashboardCardElementId,
 } from "./operatorSummaryTargets.js";
@@ -42,6 +43,20 @@ import {
   shouldOfferFullSnapshotReload,
 } from "./snapshotSourceInfo.js";
 import { copyTextToClipboard } from "./copyTextToClipboard.js";
+import {
+  buildBadgeListTitle,
+  buildBadgePreviewMetadata,
+} from "./pairFormatting.js";
+import { formatRecoverySourceLabel } from "./recoverySourceFormatting.js";
+import { buildStaleCleanupHeaderBadges } from "./staleCleanupHeaderBadges.js";
+import { buildReviewItemPreviewSummary } from "./reviewPreviewSummary.js";
+import {
+  formatReviewItemAgeLabel,
+  formatReviewItemOutcomeLabel,
+  formatReviewItemReasonLabel,
+  formatReviewItemScopeLabel,
+  getReviewItemOutcomeTone,
+} from "./reviewItemFormatting.js";
 import {
   buildPreviewExitUrl,
   resolveDebugSourcePreview,
@@ -151,6 +166,372 @@ function jumpToDashboardTarget(target) {
   return true;
 }
 
+function buildOverflowBadgeTitles(
+  hiddenValues,
+  {
+    formatValue = (value) => asText(value),
+    titlePrefix = "More items",
+  } = {}
+) {
+  const normalizedHiddenValues = asArray(hiddenValues)
+    .map((hiddenValue) => asText(formatValue(hiddenValue)).trim())
+    .filter(Boolean);
+
+  if (!normalizedHiddenValues.length) {
+    return null;
+  }
+
+  return {
+    [`+${normalizedHiddenValues.length}`]: `${titlePrefix}: ${normalizedHiddenValues.join(", ")}`,
+  };
+}
+
+function buildLabeledValueTitle(label, value) {
+  const normalizedValue = asText(value).trim();
+  if (!normalizedValue) {
+    return undefined;
+  }
+
+  const normalizedLabel = asText(label, "Details").trim() || "Details";
+  return `${normalizedLabel}: ${normalizedValue}`;
+}
+
+function buildSignalAgeDetailTitle(ageSeconds) {
+  if (typeof ageSeconds !== "number" || !Number.isFinite(ageSeconds)) {
+    return undefined;
+  }
+
+  if (ageSeconds < 0) {
+    return undefined;
+  }
+
+  return buildLabeledValueTitle(
+    "Signal age",
+    `${Math.floor(ageSeconds)} seconds`
+  );
+}
+
+function buildRecoverySourceValueTitle(sourceLabel) {
+  const normalizedSourceLabel = asText(sourceLabel).trim();
+  if (!normalizedSourceLabel) {
+    return undefined;
+  }
+
+  const formattedSourceLabel = formatRecoverySourceLabel(normalizedSourceLabel);
+  if (formattedSourceLabel && formattedSourceLabel !== normalizedSourceLabel) {
+    return `Source card: ${formattedSourceLabel} (${normalizedSourceLabel})`;
+  }
+
+  return buildLabeledValueTitle("Source card", formattedSourceLabel);
+}
+
+function buildCountValueTitle(value, singularLabel, pluralLabel = singularLabel) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  if (value < 0) {
+    return undefined;
+  }
+
+  const normalizedCount = Math.floor(value);
+  if (normalizedCount === 0) {
+    return `No ${pluralLabel}`;
+  }
+
+  const nounLabel =
+    normalizedCount === 1 ? singularLabel : pluralLabel;
+  return `${normalizedCount} ${nounLabel}`;
+}
+
+function buildCompactBadgeData(
+  value,
+  maxVisible = 3,
+  {
+    formatHiddenValue = (hiddenValue) => hiddenValue,
+    titlePrefix = "More items",
+  } = {}
+) {
+  const badgePreviewMetadata = buildBadgePreviewMetadata(value, maxVisible);
+  return {
+    badges: badgePreviewMetadata.badges,
+    badgeTitles: buildOverflowBadgeTitles(
+      badgePreviewMetadata.hiddenValues,
+      {
+        formatValue: formatHiddenValue,
+        titlePrefix,
+      }
+    ),
+  };
+}
+
+function buildHeaderBadgeTitleWithExtra(baseTitle, extraTitle) {
+  const normalizedBaseTitle = asText(baseTitle).trim();
+  const normalizedExtraTitle = asText(extraTitle).trim();
+
+  if (!normalizedBaseTitle) {
+    return normalizedExtraTitle || undefined;
+  }
+
+  if (!normalizedExtraTitle) {
+    return normalizedBaseTitle;
+  }
+
+  return normalizedBaseTitle.endsWith(".")
+    ? `${normalizedBaseTitle} ${normalizedExtraTitle}.`
+    : `${normalizedBaseTitle}. ${normalizedExtraTitle}.`;
+}
+
+function normalizePositiveCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  if (value <= 0) {
+    return 0;
+  }
+
+  return Math.floor(value);
+}
+
+function buildManualRecoveryHeaderBadges(manualRecoveryRequiredCount) {
+  const normalizedManualRecoveryCount = normalizePositiveCount(
+    manualRecoveryRequiredCount
+  );
+  if (normalizedManualRecoveryCount <= 0) {
+    return [];
+  }
+
+  const manualRecoveryTitle = buildCountValueTitle(
+    normalizedManualRecoveryCount,
+    "manual recovery item",
+    "manual recovery items"
+  );
+
+  if (!manualRecoveryTitle) {
+    return [];
+  }
+
+  return [
+    {
+      key: "manual-recovery-count",
+      label: `manual recovery ${normalizedManualRecoveryCount}`,
+      tone: "warning",
+      title: manualRecoveryTitle,
+    },
+  ];
+}
+
+function buildMaintenanceHeaderBadges(summary) {
+  const staleCleanupHeaderBadges = buildStaleCleanupHeaderBadges({
+    blockedCount: summary?.stale_signal_blocked_count,
+    previewReadyCount: summary?.stale_signal_preview_ready_count,
+    cleanedCount: summary?.stale_signal_cleaned_count,
+  });
+  const normalizedManualRecoveryCount = normalizePositiveCount(
+    summary?.manual_recovery_required_count
+  );
+  const manualRecoveryTitle =
+    normalizedManualRecoveryCount > 0
+      ? buildCountValueTitle(
+          normalizedManualRecoveryCount,
+          "manual recovery item",
+          "manual recovery items"
+        )
+      : undefined;
+
+  if (staleCleanupHeaderBadges.length) {
+    return staleCleanupHeaderBadges.map((badge) => ({
+      ...badge,
+      title: buildHeaderBadgeTitleWithExtra(badge.title, manualRecoveryTitle),
+    }));
+  }
+
+  return buildManualRecoveryHeaderBadges(
+    summary?.manual_recovery_required_count
+  );
+}
+
+function buildMaintenanceActionButtons(
+  summary,
+  {
+    staleReviewAvailable = false,
+    manualReviewAvailable = false,
+  } = {}
+) {
+  const actionButtons = [];
+
+  if (staleReviewAvailable && hasStaleSignalSummaryItems(summary)) {
+    actionButtons.push({
+      key: "jump-stale-review",
+      label: "Open Stale Cleanup Review",
+      onClick: () => {
+        jumpToDashboardTarget(
+          DASHBOARD_SECTION_TARGETS.recoveryStaleSignalCleanupReview
+        );
+      },
+      title: "Open the review card: Stale Cleanup Review",
+      disabled: false,
+      group: "jump",
+      className:
+        "secondary-button secondary-button-subdued secondary-button-compact",
+    });
+  }
+
+  if (
+    manualReviewAvailable &&
+    normalizePositiveCount(summary?.manual_recovery_required_count) > 0
+  ) {
+    actionButtons.push({
+      key: "jump-manual-review",
+      label: "Open Manual Recovery Review",
+      onClick: () => {
+        jumpToDashboardTarget(DASHBOARD_SECTION_TARGETS.recoveryReview);
+      },
+      title: "Open the review card: Manual Recovery Review",
+      disabled: false,
+      group: "jump",
+      className:
+        "secondary-button secondary-button-subdued secondary-button-compact",
+    });
+  }
+
+  return actionButtons;
+}
+
+function buildRecoveryReviewActionButtons({
+  maintenancePreviewSummary,
+  maintenanceExecuteSummary,
+} = {}) {
+  const actionButtons = [];
+
+  if (
+    normalizePositiveCount(
+      maintenancePreviewSummary?.manual_recovery_required_count
+    ) > 0
+  ) {
+    actionButtons.push({
+      key: "jump-maintenance-preview",
+      label: "Open Maintenance Preview",
+      onClick: () => {
+        jumpToDashboardTarget(
+          DASHBOARD_SECTION_TARGETS.recoveryMaintenancePreview
+        );
+      },
+      title: "Open the source card: Maintenance Preview",
+      disabled: false,
+      group: "jump",
+      className:
+        "secondary-button secondary-button-subdued secondary-button-compact",
+    });
+  }
+
+  if (
+    normalizePositiveCount(
+      maintenanceExecuteSummary?.manual_recovery_required_count
+    ) > 0
+  ) {
+    actionButtons.push({
+      key: "jump-maintenance-execute",
+      label: "Open Maintenance Execute",
+      onClick: () => {
+        jumpToDashboardTarget(
+          DASHBOARD_SECTION_TARGETS.recoveryMaintenanceExecute
+        );
+      },
+      title: "Open the source card: Maintenance Execute",
+      disabled: false,
+      group: "jump",
+      className:
+        "secondary-button secondary-button-subdued secondary-button-compact",
+    });
+  }
+
+  return actionButtons;
+}
+
+function buildReasonCodeBadgeData(reasonCodesValue) {
+  const badgePreviewMetadata = buildBadgePreviewMetadata(reasonCodesValue, 2);
+  return {
+    badges: badgePreviewMetadata.badges.map((reasonCode) =>
+      isOverflowBadgeValue(reasonCode)
+        ? reasonCode
+        : formatReviewItemReasonLabel(reasonCode)
+    ),
+      badgeTitles: buildOverflowBadgeTitles(
+      badgePreviewMetadata.hiddenValues,
+      {
+        formatValue: formatReviewItemReasonLabel,
+        titlePrefix: "More stale cleanup reasons",
+      }
+    ),
+  };
+}
+
+function isOverflowBadgeValue(value) {
+  return /^\+\d+$/.test(asText(value));
+}
+
+function resolveStaleReviewSourceJumpTarget(sourceLabel) {
+  if (sourceLabel === "order_maintenance.preview") {
+    return DASHBOARD_SECTION_TARGETS.recoveryMaintenancePreview;
+  }
+
+  if (sourceLabel === "order_maintenance.execute") {
+    return DASHBOARD_SECTION_TARGETS.recoveryMaintenanceExecute;
+  }
+
+  return null;
+}
+
+function buildStaleReviewSourceJumpLabel(sourceLabel) {
+  if (sourceLabel === "order_maintenance.preview") {
+    return "Open Maintenance Preview";
+  }
+
+  if (sourceLabel === "order_maintenance.execute") {
+    return "Open Maintenance Execute";
+  }
+
+  return "Open Source Card";
+}
+
+function hasStaleSignalSummaryItems(summary) {
+  if (!summary || typeof summary !== "object") {
+    return false;
+  }
+
+  const previewReadyCount = Number(summary.stale_signal_preview_ready_count) || 0;
+  const blockedCount = Number(summary.stale_signal_blocked_count) || 0;
+  const cleanedCount = Number(summary.stale_signal_cleaned_count) || 0;
+  return previewReadyCount > 0 || blockedCount > 0 || cleanedCount > 0;
+}
+
+function groupActionButtons(actionButtons) {
+  const groups = [];
+  const groupMap = new Map();
+
+  asArray(actionButtons).forEach((actionButton) => {
+    if (!actionButton) {
+      return;
+    }
+
+    const groupKey = asText(actionButton.group, "default");
+    if (!groupMap.has(groupKey)) {
+      const nextGroup = {
+        key: groupKey,
+        buttons: [],
+      };
+      groupMap.set(groupKey, nextGroup);
+      groups.push(nextGroup);
+    }
+
+    groupMap.get(groupKey).buttons.push(actionButton);
+  });
+
+  return groups;
+}
+
 function MetricCard({ label, value, subtext, statusLevel }) {
   return (
     <article className="metric-card">
@@ -169,8 +550,45 @@ function PairList({ pairs }) {
     <div className="pair-list">
       {pairs.map((pair) => (
         <div className="pair-row" key={pair.key}>
-          <span className="pair-key">{pair.key}</span>
-          <strong className="pair-value">{asText(pair.value)}</strong>
+          <span
+            className="pair-key"
+            title={
+              pair.label && asText(pair.label) !== asText(pair.key)
+                ? `Field key: ${asText(pair.key)}`
+                : undefined
+            }
+          >
+            {asText(pair.label, pair.key)}
+          </span>
+          {asArray(pair.badges).length ? (
+            <div
+              className="pair-badge-list"
+              title={pair.title ? asText(pair.title) : undefined}
+            >
+              {asArray(pair.badges).map((badge) => (
+                <span
+                  className={`pair-badge ${
+                    isOverflowBadgeValue(badge) ? "pair-badge-overflow" : ""
+                  }`.trim()}
+                  key={`${pair.key}:${badge}`}
+                  title={
+                    pair.badgeTitles?.[badge]
+                      ? asText(pair.badgeTitles[badge])
+                      : undefined
+                  }
+                >
+                  {asText(badge)}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <strong
+              className="pair-value"
+              title={pair.title ? asText(pair.title) : undefined}
+            >
+              {asText(pair.value)}
+            </strong>
+          )}
         </div>
       ))}
     </div>
@@ -180,7 +598,7 @@ function PairList({ pairs }) {
 function FlagList({ flags }) {
   const rows = asArray(flags);
   if (!rows.length) {
-    return <p className="empty-copy">No warning flags.</p>;
+    return null;
   }
 
   return (
@@ -199,8 +617,105 @@ function FlagList({ flags }) {
   );
 }
 
-function InfoCard({ label, title, statusLevel, pairs, flags, cardId, cardKey }) {
+function ReviewItemList({ items, title, summary }) {
+  const rows = asArray(items);
+  if (!rows.length) {
+    return null;
+  }
+
+  return (
+    <div className="review-item-block">
+      <p className="review-item-title">{title || "Review Items"}</p>
+      {summary ? (
+        <div className="review-item-summary-row">
+          <span className="review-item-summary-badge" title={summary.title}>
+            {summary.label}
+          </span>
+        </div>
+      ) : null}
+      <div className="review-item-list">
+        {rows.map((item, index) => {
+          const scope = asText(item?.scope, "-");
+          const scopeLabel = formatReviewItemScopeLabel(item?.scope);
+          const symbol = asText(item?.symbol, "-");
+          const strategyName = asText(item?.strategy_name, "");
+          const scannedAt = asText(item?.scanned_at, "");
+          const outcome = asText(item?.outcome, "-");
+          const outcomeLabel = formatReviewItemOutcomeLabel(item?.outcome);
+          const outcomeTone = getReviewItemOutcomeTone(item?.outcome);
+          const reasonCode = asText(item?.reason_code, "-");
+          const reasonLabel = formatReviewItemReasonLabel(item?.reason_code);
+          const ageLabel = formatReviewItemAgeLabel(item?.age_seconds);
+          const detailTitleParts = [];
+          if (strategyName) {
+            detailTitleParts.push(buildLabeledValueTitle("Strategy", strategyName));
+          }
+          if (scannedAt) {
+            detailTitleParts.push(buildLabeledValueTitle("Scanned At", scannedAt));
+          }
+          if (reasonCode && reasonCode !== "-") {
+            detailTitleParts.push(
+              buildLabeledValueTitle("Reason code", reasonCode)
+            );
+          }
+          const signalAgeDetailTitle = buildSignalAgeDetailTitle(
+            item?.age_seconds
+          );
+          if (signalAgeDetailTitle) {
+            detailTitleParts.push(signalAgeDetailTitle);
+          }
+          const detailTitle =
+            detailTitleParts.length > 0
+              ? detailTitleParts.filter(Boolean).join("\n")
+              : undefined;
+          return (
+            <div
+              className={`review-item-row review-item-row-${outcomeTone}`}
+              key={`${scope}:${symbol}:${outcome}:${index}`}
+              title={detailTitle}
+            >
+              <div className="review-item-main">
+                <strong>{symbol}</strong>
+                <span title={scope !== scopeLabel ? scope : undefined}>
+                  {scopeLabel}
+                </span>
+              </div>
+              <div className="review-item-meta">
+                <span
+                  className={`review-item-outcome-badge review-item-outcome-badge-${outcomeTone}`}
+                  title={outcome !== outcomeLabel ? outcome : undefined}
+                >
+                  {outcomeLabel}
+                </span>
+                <span title={reasonCode !== reasonLabel ? reasonCode : undefined}>
+                  {reasonLabel}
+                </span>
+                {ageLabel ? <span>{ageLabel}</span> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function InfoCard({
+  label,
+  title,
+  statusLevel,
+  pairs,
+  flags,
+  cardId,
+  cardKey,
+  detailItems,
+  detailTitle,
+  detailSummary,
+  actionButtons,
+  headerBadges,
+}) {
   const resolvedCardId = cardId || dashboardCardElementId(cardKey);
+  const actionButtonGroups = groupActionButtons(actionButtons);
   return (
     <article
       id={resolvedCardId}
@@ -211,10 +726,50 @@ function InfoCard({ label, title, statusLevel, pairs, flags, cardId, cardKey }) 
         <div>
           <p className="info-label">{label}</p>
           <h3>{title}</h3>
+          {asArray(headerBadges).length ? (
+            <div className="info-card-header-badges">
+              {asArray(headerBadges).map((badge) => (
+                <span
+                  className={`info-card-header-badge info-card-header-badge-${
+                    badge.tone || "neutral"
+                  }`}
+                  key={badge.key || badge.label}
+                  title={badge.title ? asText(badge.title) : undefined}
+                >
+                  {badge.label}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
         <StatusBadge level={statusLevel} />
       </div>
       <PairList pairs={pairs} />
+      <ReviewItemList
+        items={detailItems}
+        title={detailTitle}
+        summary={detailSummary}
+      />
+      {actionButtonGroups.length ? (
+        <div className="info-card-action-groups">
+          {actionButtonGroups.map((actionButtonGroup) => (
+            <div className="source-detail-actions" key={actionButtonGroup.key}>
+              {actionButtonGroup.buttons.map((actionButton) => (
+                <button
+                  key={actionButton.key || actionButton.label}
+                  className={actionButton.className}
+                  type="button"
+                  onClick={actionButton.onClick}
+                  title={actionButton.title}
+                  disabled={actionButton.disabled}
+                >
+                  {actionButton.label}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : null}
       <FlagList flags={flags} />
     </article>
   );
@@ -396,6 +951,10 @@ function App() {
   );
   const [sourceStatusMessage, setSourceStatusMessage] = useState("");
   const [sourceDetailCopyStatusMessage, setSourceDetailCopyStatusMessage] = useState("");
+  const [staleReviewPathCopyStatusMessage, setStaleReviewPathCopyStatusMessage] =
+    useState("");
+  const [staleReviewSourcePathCopyStatusMessage, setStaleReviewSourcePathCopyStatusMessage] =
+    useState("");
   const [isSourceDetailExpanded, setIsSourceDetailExpanded] = useState(false);
   const [lastSuccessfulRefreshAt, setLastSuccessfulRefreshAt] = useState("");
   const [lastRefreshErrorAt, setLastRefreshErrorAt] = useState("");
@@ -427,6 +986,12 @@ function App() {
   const rehearsal = deferredSnapshot.rehearsal || {};
   const sources = deferredSnapshot.sources || {};
   const actions = deferredSnapshot.actions || {};
+  const staleReviewSourceJumpTarget = resolveStaleReviewSourceJumpTarget(
+    recovery.stale_signal_cleanup_review?.source_label
+  );
+  const staleReviewSourceJumpLabel = buildStaleReviewSourceJumpLabel(
+    recovery.stale_signal_cleanup_review?.source_label
+  );
   const sourceJumpTarget = buildSourceInfoJumpTarget(sourceInfo);
   const canReloadFullSnapshot = shouldOfferFullSnapshotReload(
     sourceInfo,
@@ -475,6 +1040,26 @@ function App() {
         ? "Shown Below"
         : "Copy Failed"
     : "Copy Full Name";
+  const staleReviewArtifactPath =
+    recovery.stale_signal_cleanup_review?.path || "";
+  const canCopyStaleReviewArtifactPath = Boolean(staleReviewArtifactPath);
+  const staleReviewArtifactPathCopySuccess =
+    staleReviewPathCopyStatusMessage === "Copied";
+  const staleReviewArtifactPathCopyButtonLabel = staleReviewPathCopyStatusMessage
+    ? staleReviewArtifactPathCopySuccess
+      ? "Copied"
+      : "Copy Failed"
+    : "Copy Stale Cleanup Review JSON File";
+  const staleReviewSourcePath =
+    recovery.stale_signal_cleanup_review?.source_path || "";
+  const canCopyStaleReviewSourcePath = Boolean(staleReviewSourcePath);
+  const staleReviewSourcePathCopySuccess =
+    staleReviewSourcePathCopyStatusMessage === "Copied";
+  const staleReviewSourcePathCopyButtonLabel = staleReviewSourcePathCopyStatusMessage
+    ? staleReviewSourcePathCopySuccess
+      ? "Copied"
+      : "Copy Failed"
+    : "Copy Source Card JSON File";
   const operatorSummaryWithRelated = {
     ...operatorSummary,
     related_action_codes: asArray(actions.top_action_codes).filter(
@@ -521,9 +1106,42 @@ function App() {
   }, [sourceDetailCopyStatusMessage]);
 
   useEffect(() => {
+    if (!staleReviewPathCopyStatusMessage) {
+      return undefined;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setStaleReviewPathCopyStatusMessage("");
+    }, SOURCE_STATUS_MESSAGE_CLEAR_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [staleReviewPathCopyStatusMessage]);
+
+  useEffect(() => {
+    if (!staleReviewSourcePathCopyStatusMessage) {
+      return undefined;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setStaleReviewSourcePathCopyStatusMessage("");
+    }, SOURCE_STATUS_MESSAGE_CLEAR_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [staleReviewSourcePathCopyStatusMessage]);
+
+  useEffect(() => {
     setSourceDetailCopyStatusMessage("");
     setIsSourceDetailExpanded(false);
   }, [sourceInfo.label, sourceInfo.detailLabel, sourceInfo.updateKind]);
+
+  useEffect(() => {
+    setStaleReviewPathCopyStatusMessage("");
+    setStaleReviewSourcePathCopyStatusMessage("");
+  }, [staleReviewArtifactPath, staleReviewSourcePath]);
 
   async function loadFromServer(nextTradeDate, options = {}) {
     const safeTradeDate = nextTradeDate || tradeDate;
@@ -602,6 +1220,32 @@ function App() {
       setSourceDetailCopyStatusMessage(
         buildSourceDetailCopyFailureMessage(canExpandSourceDetail),
       );
+    }
+  }
+
+  async function handleCopyStaleReviewArtifactPath() {
+    if (!staleReviewArtifactPath) {
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(staleReviewArtifactPath);
+      setStaleReviewPathCopyStatusMessage("Copied");
+    } catch {
+      setStaleReviewPathCopyStatusMessage("Copy Failed");
+    }
+  }
+
+  async function handleCopyStaleReviewSourcePath() {
+    if (!staleReviewSourcePath) {
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(staleReviewSourcePath);
+      setStaleReviewSourcePathCopyStatusMessage("Copied");
+    } catch {
+      setStaleReviewSourcePathCopyStatusMessage("Copy Failed");
     }
   }
 
@@ -959,6 +1603,38 @@ function App() {
     },
   ];
 
+  const maintenancePreviewSymbolBadges = buildCompactBadgeData(
+    recovery.order_maintenance_preview?.stale_signal_symbol_hint,
+    3,
+    { titlePrefix: "More stale cleanup symbols" }
+  );
+  const maintenancePreviewBlockedReasonBadges = buildReasonCodeBadgeData(
+    recovery.order_maintenance_preview?.stale_signal_blocked_reason_codes
+  );
+  const maintenanceExecuteSymbolBadges = buildCompactBadgeData(
+    recovery.order_maintenance_execute?.stale_signal_symbol_hint,
+    3,
+    { titlePrefix: "More stale cleanup symbols" }
+  );
+  const maintenanceExecuteBlockedReasonBadges = buildReasonCodeBadgeData(
+    recovery.order_maintenance_execute?.stale_signal_blocked_reason_codes
+  );
+  const staleReviewTopSymbolBadges = buildCompactBadgeData(
+    recovery.stale_signal_cleanup_review?.top_symbols,
+    3,
+    { titlePrefix: "More top stale cleanup review symbols" }
+  );
+  const staleReviewDetailSummary = buildReviewItemPreviewSummary(
+    recovery.stale_signal_cleanup_review?.preview_items,
+    recovery.stale_signal_cleanup_review?.review_item_count,
+    {
+      blockedCount: recovery.stale_signal_cleanup_review?.blocked_item_count,
+      previewReadyCount:
+        recovery.stale_signal_cleanup_review?.preview_ready_item_count,
+      cleanedCount: recovery.stale_signal_cleanup_review?.cleaned_item_count,
+    }
+  );
+
   const recoveryCards = [
     {
       label: "Maintenance Preview",
@@ -967,6 +1643,114 @@ function App() {
         recovery.order_maintenance_preview?.card_key ||
         DASHBOARD_CARD_KEYS.recoveryMaintenancePreview,
       row: recovery.order_maintenance_preview || {},
+      headerBadges: buildMaintenanceHeaderBadges(
+        recovery.order_maintenance_preview
+      ),
+      actionButtons: buildMaintenanceActionButtons(
+        recovery.order_maintenance_preview,
+        {
+          staleReviewAvailable: recovery.stale_signal_cleanup_review?.available,
+          manualReviewAvailable:
+            recovery.execution_recovery_review?.available,
+        }
+      ),
+      pairs: [
+        {
+          key: "manual_recovery_required_count",
+          label: "manual recovery items",
+          value: recovery.order_maintenance_preview?.manual_recovery_required_count,
+          title: buildCountValueTitle(
+            recovery.order_maintenance_preview?.manual_recovery_required_count,
+            "manual recovery item",
+            "manual recovery items"
+          ),
+        },
+        {
+          key: "stale_signal_preview_ready_count",
+          label: "preview-ready items",
+          value: recovery.order_maintenance_preview?.stale_signal_preview_ready_count,
+          title: buildCountValueTitle(
+            recovery.order_maintenance_preview?.stale_signal_preview_ready_count,
+            "preview-ready stale cleanup item",
+            "preview-ready stale cleanup items"
+          ),
+        },
+        ...((recovery.order_maintenance_preview?.stale_signal_cleaned_count || 0) >
+        0
+          ? [
+              {
+                key: "stale_signal_cleaned_count",
+                label: "cleaned items",
+                value:
+                  recovery.order_maintenance_preview?.stale_signal_cleaned_count,
+                title: buildCountValueTitle(
+                  recovery.order_maintenance_preview?.stale_signal_cleaned_count,
+                  "cleaned stale cleanup item",
+                  "cleaned stale cleanup items"
+                ),
+              },
+            ]
+          : []),
+        {
+          key: "stale_signal_blocked_count",
+          label: "blocked items",
+          value: recovery.order_maintenance_preview?.stale_signal_blocked_count,
+          title: buildCountValueTitle(
+            recovery.order_maintenance_preview?.stale_signal_blocked_count,
+            "blocked stale cleanup item",
+            "blocked stale cleanup items"
+          ),
+        },
+        ...(hasStaleSignalSummaryItems(recovery.order_maintenance_preview) &&
+        recovery.order_maintenance_preview?.stale_signal_symbol_hint
+          ? [
+              {
+                key: "stale_signal_symbol_hint",
+                label: "stale cleanup symbols",
+                value: recovery.order_maintenance_preview?.stale_signal_symbol_hint,
+                title: buildBadgeListTitle(
+                  recovery.order_maintenance_preview?.stale_signal_symbol_hint,
+                  {
+                    titlePrefix: "All stale cleanup symbols",
+                  }
+                ),
+                badges: maintenancePreviewSymbolBadges.badges,
+                badgeTitles: maintenancePreviewSymbolBadges.badgeTitles,
+              },
+            ]
+          : []),
+        ...((recovery.order_maintenance_preview?.stale_signal_blocked_count || 0) > 0 &&
+        recovery.order_maintenance_preview?.stale_signal_blocked_reason_codes
+          ? [
+              {
+                key: "stale_signal_blocked_reason_codes",
+                label: "stale cleanup reasons",
+                value:
+                  recovery.order_maintenance_preview
+                    ?.stale_signal_blocked_reason_codes,
+                title: buildBadgeListTitle(
+                  recovery.order_maintenance_preview
+                    ?.stale_signal_blocked_reason_codes,
+                  {
+                    titlePrefix: "All stale cleanup reasons",
+                    formatValue: formatReviewItemReasonLabel,
+                  }
+                ),
+                badges: maintenancePreviewBlockedReasonBadges.badges,
+                badgeTitles: maintenancePreviewBlockedReasonBadges.badgeTitles,
+              },
+            ]
+          : []),
+        {
+          key: "highest_severity",
+          label: "highest severity",
+          value: recovery.order_maintenance_preview?.highest_severity,
+          title: buildLabeledValueTitle(
+            "Highest severity",
+            recovery.order_maintenance_preview?.highest_severity
+          ),
+        },
+      ],
     },
     {
       label: "Maintenance Execute",
@@ -975,14 +1759,321 @@ function App() {
         recovery.order_maintenance_execute?.card_key ||
         DASHBOARD_CARD_KEYS.recoveryMaintenanceExecute,
       row: recovery.order_maintenance_execute || {},
+      headerBadges: buildMaintenanceHeaderBadges(
+        recovery.order_maintenance_execute
+      ),
+      actionButtons: buildMaintenanceActionButtons(
+        recovery.order_maintenance_execute,
+        {
+          staleReviewAvailable: recovery.stale_signal_cleanup_review?.available,
+          manualReviewAvailable:
+            recovery.execution_recovery_review?.available,
+        }
+      ),
+      pairs: [
+        {
+          key: "manual_recovery_required_count",
+          label: "manual recovery items",
+          value: recovery.order_maintenance_execute?.manual_recovery_required_count,
+          title: buildCountValueTitle(
+            recovery.order_maintenance_execute?.manual_recovery_required_count,
+            "manual recovery item",
+            "manual recovery items"
+          ),
+        },
+        {
+          key: "stale_signal_cleaned_count",
+          label: "cleaned items",
+          value: recovery.order_maintenance_execute?.stale_signal_cleaned_count,
+          title: buildCountValueTitle(
+            recovery.order_maintenance_execute?.stale_signal_cleaned_count,
+            "cleaned stale cleanup item",
+            "cleaned stale cleanup items"
+          ),
+        },
+        ...((recovery.order_maintenance_execute?.stale_signal_preview_ready_count ||
+          0) > 0
+          ? [
+              {
+                key: "stale_signal_preview_ready_count",
+                label: "preview-ready items",
+                value:
+                  recovery.order_maintenance_execute
+                    ?.stale_signal_preview_ready_count,
+                title: buildCountValueTitle(
+                  recovery.order_maintenance_execute
+                    ?.stale_signal_preview_ready_count,
+                  "preview-ready stale cleanup item",
+                  "preview-ready stale cleanup items"
+                ),
+              },
+            ]
+          : []),
+        {
+          key: "stale_signal_blocked_count",
+          label: "blocked items",
+          value: recovery.order_maintenance_execute?.stale_signal_blocked_count,
+          title: buildCountValueTitle(
+            recovery.order_maintenance_execute?.stale_signal_blocked_count,
+            "blocked stale cleanup item",
+            "blocked stale cleanup items"
+          ),
+        },
+        ...(hasStaleSignalSummaryItems(recovery.order_maintenance_execute) &&
+        recovery.order_maintenance_execute?.stale_signal_symbol_hint
+          ? [
+              {
+                key: "stale_signal_symbol_hint",
+                label: "stale cleanup symbols",
+                value: recovery.order_maintenance_execute?.stale_signal_symbol_hint,
+                title: buildBadgeListTitle(
+                  recovery.order_maintenance_execute?.stale_signal_symbol_hint,
+                  {
+                    titlePrefix: "All stale cleanup symbols",
+                  }
+                ),
+                badges: maintenanceExecuteSymbolBadges.badges,
+                badgeTitles: maintenanceExecuteSymbolBadges.badgeTitles,
+              },
+            ]
+          : []),
+        ...((recovery.order_maintenance_execute?.stale_signal_blocked_count || 0) > 0 &&
+        recovery.order_maintenance_execute?.stale_signal_blocked_reason_codes
+          ? [
+              {
+                key: "stale_signal_blocked_reason_codes",
+                label: "stale cleanup reasons",
+                value:
+                  recovery.order_maintenance_execute
+                    ?.stale_signal_blocked_reason_codes,
+                title: buildBadgeListTitle(
+                  recovery.order_maintenance_execute
+                    ?.stale_signal_blocked_reason_codes,
+                  {
+                    titlePrefix: "All stale cleanup reasons",
+                    formatValue: formatReviewItemReasonLabel,
+                  }
+                ),
+                badges: maintenanceExecuteBlockedReasonBadges.badges,
+                badgeTitles: maintenanceExecuteBlockedReasonBadges.badgeTitles,
+              },
+            ]
+          : []),
+        {
+          key: "highest_severity",
+          label: "highest severity",
+          value: recovery.order_maintenance_execute?.highest_severity,
+          title: buildLabeledValueTitle(
+            "Highest severity",
+            recovery.order_maintenance_execute?.highest_severity
+          ),
+        },
+      ],
     },
     {
-      label: "Recovery Review",
+      label: "Stale Cleanup Review",
+      title: "stale_signal_cleanup.review",
+      cardKey:
+        recovery.stale_signal_cleanup_review?.card_key ||
+        DASHBOARD_CARD_KEYS.recoveryStaleSignalCleanupReview,
+      row: recovery.stale_signal_cleanup_review || {},
+      headerBadges: buildStaleCleanupHeaderBadges({
+        totalCount: recovery.stale_signal_cleanup_review?.review_item_count,
+        blockedCount: recovery.stale_signal_cleanup_review?.blocked_item_count,
+        previewReadyCount:
+          recovery.stale_signal_cleanup_review?.preview_ready_item_count,
+        cleanedCount: recovery.stale_signal_cleanup_review?.cleaned_item_count,
+      }),
+      detailItems: recovery.stale_signal_cleanup_review?.preview_items,
+      detailTitle: staleReviewDetailSummary
+        ? "Top Stale Cleanup Review Items"
+        : "Stale Cleanup Review Items",
+      detailSummary: staleReviewDetailSummary,
+      actionButtons: [
+        staleReviewSourceJumpTarget
+          ? {
+              key: "jump-source-card",
+              label: staleReviewSourceJumpLabel,
+              onClick: () => {
+                jumpToDashboardTarget(staleReviewSourceJumpTarget);
+              },
+              title: `Open the source card: ${staleReviewSourceJumpTarget.label}`,
+              disabled: false,
+              group: "jump",
+              className:
+                "secondary-button secondary-button-subdued secondary-button-compact",
+            }
+          : null,
+        canCopyStaleReviewArtifactPath
+          ? {
+              key: "copy-review-path",
+              label: staleReviewArtifactPathCopyButtonLabel,
+              onClick: () => {
+                void handleCopyStaleReviewArtifactPath();
+              },
+              title:
+                staleReviewPathCopyStatusMessage ||
+                "Copy the full path to the stale cleanup review JSON file",
+              disabled: false,
+              group: "copy",
+              className: `source-detail-copy-button ${
+                staleReviewPathCopyStatusMessage
+                  ? staleReviewArtifactPathCopySuccess
+                    ? "source-detail-copy-button-success"
+                    : "source-detail-copy-button-failed"
+                  : ""
+              }`.trim(),
+            }
+          : null,
+        canCopyStaleReviewSourcePath
+          ? {
+              key: "copy-source-path",
+              label: staleReviewSourcePathCopyButtonLabel,
+              onClick: () => {
+                void handleCopyStaleReviewSourcePath();
+              },
+              title:
+                staleReviewSourcePathCopyStatusMessage ||
+                "Copy the full path to the source card JSON file",
+              disabled: false,
+              group: "copy",
+              className: `source-detail-copy-button ${
+                staleReviewSourcePathCopyStatusMessage
+                  ? staleReviewSourcePathCopySuccess
+                    ? "source-detail-copy-button-success"
+                    : "source-detail-copy-button-failed"
+                  : ""
+              }`.trim(),
+            }
+          : null,
+      ].filter(Boolean),
+      pairs: [
+        {
+          key: "review_item_count",
+          label: "total stale cleanup review items",
+          value: recovery.stale_signal_cleanup_review?.review_item_count,
+          title: buildLabeledValueTitle(
+            "Total stale cleanup review items",
+            recovery.stale_signal_cleanup_review?.review_item_count
+          ),
+        },
+        {
+          key: "blocked_item_count",
+          label: "blocked items",
+          value: recovery.stale_signal_cleanup_review?.blocked_item_count,
+          title: buildCountValueTitle(
+            recovery.stale_signal_cleanup_review?.blocked_item_count,
+            "blocked stale cleanup item",
+            "blocked stale cleanup items"
+          ),
+        },
+        {
+          key: "preview_ready_item_count",
+          label: "preview-ready items",
+          value: recovery.stale_signal_cleanup_review?.preview_ready_item_count,
+          title: buildCountValueTitle(
+            recovery.stale_signal_cleanup_review?.preview_ready_item_count,
+            "preview-ready stale cleanup item",
+            "preview-ready stale cleanup items"
+          ),
+        },
+        {
+          key: "cleaned_item_count",
+          label: "cleaned items",
+          value: recovery.stale_signal_cleanup_review?.cleaned_item_count,
+          title: buildCountValueTitle(
+            recovery.stale_signal_cleanup_review?.cleaned_item_count,
+            "cleaned stale cleanup item",
+            "cleaned stale cleanup items"
+          ),
+        },
+        {
+          key: "highest_severity",
+          label: "highest severity",
+          value: recovery.stale_signal_cleanup_review?.highest_severity,
+          title: buildLabeledValueTitle(
+            "Highest severity",
+            recovery.stale_signal_cleanup_review?.highest_severity
+          ),
+        },
+        {
+          key: "top_symbols",
+          label: "top stale cleanup review symbols",
+          value: recovery.stale_signal_cleanup_review?.top_symbols,
+          title: buildBadgeListTitle(
+            recovery.stale_signal_cleanup_review?.top_symbols,
+            {
+              titlePrefix: "All top stale cleanup review symbols",
+            }
+          ),
+          badges: staleReviewTopSymbolBadges.badges,
+          badgeTitles: staleReviewTopSymbolBadges.badgeTitles,
+        },
+        {
+          key: "review_file",
+          label: "stale cleanup review JSON file",
+          value: recovery.stale_signal_cleanup_review?.review_file_name,
+          title: buildLabeledValueTitle(
+            "Path to stale cleanup review JSON file",
+            recovery.stale_signal_cleanup_review?.path
+          ),
+        },
+        {
+          key: "source_label",
+          label: "source card",
+          value: formatRecoverySourceLabel(
+            recovery.stale_signal_cleanup_review?.source_label
+          ),
+          title: buildRecoverySourceValueTitle(
+            recovery.stale_signal_cleanup_review?.source_label
+          ),
+        },
+        {
+          key: "source_file",
+          label: "source card JSON file",
+          value: recovery.stale_signal_cleanup_review?.source_file_name,
+          title: buildLabeledValueTitle(
+            "Path to source card JSON file",
+            recovery.stale_signal_cleanup_review?.source_path
+          ),
+        },
+      ],
+    },
+    {
+      label: "Manual Recovery Review",
       title: "execution_recovery.review",
       cardKey:
         recovery.execution_recovery_review?.card_key ||
         DASHBOARD_CARD_KEYS.recoveryExecutionReview,
       row: recovery.execution_recovery_review || {},
+      headerBadges: buildManualRecoveryHeaderBadges(
+        recovery.execution_recovery_review?.manual_recovery_required_count
+      ),
+      actionButtons: buildRecoveryReviewActionButtons({
+        maintenancePreviewSummary: recovery.order_maintenance_preview,
+        maintenanceExecuteSummary: recovery.order_maintenance_execute,
+      }),
+      pairs: [
+        {
+          key: "manual_recovery_required_count",
+          label: "manual recovery items",
+          value: recovery.execution_recovery_review?.manual_recovery_required_count,
+          title: buildCountValueTitle(
+            recovery.execution_recovery_review?.manual_recovery_required_count,
+            "manual recovery item",
+            "manual recovery items"
+          ),
+        },
+        {
+          key: "highest_severity",
+          label: "highest severity",
+          value: recovery.execution_recovery_review?.highest_severity,
+          title: buildLabeledValueTitle(
+            "Highest severity",
+            recovery.execution_recovery_review?.highest_severity
+          ),
+        },
+      ],
     },
   ];
 
@@ -1691,13 +2782,12 @@ function App() {
                 label={card.label}
                 title={card.title}
                 statusLevel={card.row?.status_level || "MISSING"}
-                pairs={[
-                  {
-                    key: "manual_recovery_required_count",
-                    value: card.row?.manual_recovery_required_count,
-                  },
-                  { key: "highest_severity", value: card.row?.highest_severity },
-                ]}
+                pairs={card.pairs}
+                headerBadges={card.headerBadges}
+                detailItems={card.detailItems}
+                detailTitle={card.detailTitle}
+                detailSummary={card.detailSummary}
+                actionButtons={card.actionButtons}
                 flags={card.row?.attention_flags || []}
               />
             ))}

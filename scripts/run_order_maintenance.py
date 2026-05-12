@@ -42,6 +42,8 @@ from services import (
     RuntimeLockService,
     StaleBuyOrderCancelService,
     StaleBuyOrderCancelSettings,
+    StaleExecutionSignalCleanupService,
+    StaleExecutionSignalCleanupSettings,
     StaleSellOrderCancelService,
     UnresolvedOrderSyncService,
 )
@@ -95,6 +97,30 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         required=True,
         help="Cancel unresolved buy/sell orders older than this many seconds.",
+    )
+    parser.add_argument(
+        "--buy-max-signal-age-seconds",
+        type=int,
+        default=None,
+        help=(
+            "Optional max age for pending buy signals to cleanup during maintenance. "
+            "Disabled when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--sell-max-signal-age-seconds",
+        type=int,
+        default=None,
+        help=(
+            "Optional max age for pending sell signals to cleanup during maintenance. "
+            "Disabled when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--signal-cleanup-limit",
+        type=int,
+        default=200,
+        help="How many pending signals to inspect per buy/sell cleanup. Default: 200",
     )
     parser.add_argument(
         "--execute",
@@ -253,11 +279,43 @@ def _serialize_execution_recovery_result(result) -> dict[str, Any]:
     }
 
 
+def _serialize_signal_cleanup_result(result) -> dict[str, Any]:
+    return {
+        "trade_date": result.trade_date,
+        "scanned_at": result.scanned_at,
+        "execute_cleanup": result.execute_cleanup,
+        "matched_signal_count": result.matched_signal_count,
+        "candidate_count": result.candidate_count,
+        "preview_ready_count": result.preview_ready_count,
+        "skipped_count": result.skipped_count,
+        "cleaned_count": result.cleaned_count,
+        "blocked_count": result.blocked_count,
+        "acted_count": result.acted_count,
+        "audit_record_count": result.audit_record_count,
+        "candidates": [
+            {
+                "signal_id": item.signal_id,
+                "symbol": item.symbol,
+                "strategy_name": item.strategy_name,
+                "scanned_at": item.scanned_at,
+                "age_seconds": item.age_seconds,
+                "outcome": item.outcome.value,
+                "reason_code": item.reason_code,
+                "reason_message": item.reason_message,
+                "acted": item.acted,
+            }
+            for item in result.candidates
+        ],
+    }
+
+
 def _build_payload(
     *,
     trade_date: str,
     execute_mode: bool,
     settings: StaleBuyOrderCancelSettings,
+    buy_signal_cleanup_settings: StaleExecutionSignalCleanupSettings | None = None,
+    sell_signal_cleanup_settings: StaleExecutionSignalCleanupSettings | None = None,
     result=None,
     lock_name: str | None = None,
     lock_owner_id: str | None = None,
@@ -271,6 +329,26 @@ def _build_payload(
         "execute_mode": execute_mode,
         "settings": {
             "timeout_seconds": settings.timeout_seconds,
+            "buy_signal_cleanup": (
+                None
+                if buy_signal_cleanup_settings is None
+                else {
+                    "max_signal_age_seconds": (
+                        buy_signal_cleanup_settings.max_signal_age_seconds
+                    ),
+                    "signal_limit": buy_signal_cleanup_settings.signal_limit,
+                }
+            ),
+            "sell_signal_cleanup": (
+                None
+                if sell_signal_cleanup_settings is None
+                else {
+                    "max_signal_age_seconds": (
+                        sell_signal_cleanup_settings.max_signal_age_seconds
+                    ),
+                    "signal_limit": sell_signal_cleanup_settings.signal_limit,
+                }
+            ),
         },
         "lock_name": lock_name,
         "lock_owner_id": lock_owner_id,
@@ -299,6 +377,20 @@ def _build_payload(
         "stale_sell_cancel_result": _serialize_cancel_result(
             result.stale_sell_cancel_result
         ),
+        "stale_buy_signal_cleanup_result": (
+            None
+            if result.stale_buy_signal_cleanup_result is None
+            else _serialize_signal_cleanup_result(
+                result.stale_buy_signal_cleanup_result
+            )
+        ),
+        "stale_sell_signal_cleanup_result": (
+            None
+            if result.stale_sell_signal_cleanup_result is None
+            else _serialize_signal_cleanup_result(
+                result.stale_sell_signal_cleanup_result
+            )
+        ),
     }
     return payload
 
@@ -312,6 +404,32 @@ def main() -> int:
         cancel_settings = StaleBuyOrderCancelSettings(
             timeout_seconds=args.timeout_seconds
         ).validated()
+        if args.signal_cleanup_limit is not None:
+            if (
+                isinstance(args.signal_cleanup_limit, bool)
+                or not isinstance(args.signal_cleanup_limit, int)
+                or args.signal_cleanup_limit <= 0
+            ):
+                raise ValueError(
+                    "signal_cleanup_limit must be a positive integer: "
+                    f"{args.signal_cleanup_limit!r}"
+                )
+        buy_signal_cleanup_settings = (
+            None
+            if args.buy_max_signal_age_seconds is None
+            else StaleExecutionSignalCleanupSettings(
+                max_signal_age_seconds=args.buy_max_signal_age_seconds,
+                signal_limit=args.signal_cleanup_limit,
+            ).validated()
+        )
+        sell_signal_cleanup_settings = (
+            None
+            if args.sell_max_signal_age_seconds is None
+            else StaleExecutionSignalCleanupSettings(
+                max_signal_age_seconds=args.sell_max_signal_age_seconds,
+                signal_limit=args.signal_cleanup_limit,
+            ).validated()
+        )
     except Exception as exc:
         _fail("startup", f"{type(exc).__name__}: {exc}")
         return 5
@@ -329,6 +447,19 @@ def main() -> int:
     _ok("trade_date", args.trade_date)
     _ok("execute", str(args.execute))
     _ok("timeout_seconds", str(cancel_settings.timeout_seconds))
+    _ok(
+        "buy_max_signal_age_seconds",
+        "-"
+        if buy_signal_cleanup_settings is None
+        else str(buy_signal_cleanup_settings.max_signal_age_seconds),
+    )
+    _ok(
+        "sell_max_signal_age_seconds",
+        "-"
+        if sell_signal_cleanup_settings is None
+        else str(sell_signal_cleanup_settings.max_signal_age_seconds),
+    )
+    _ok("signal_cleanup_limit", str(args.signal_cleanup_limit))
     _ok("db_path", str(db_path))
 
     try:
@@ -346,6 +477,8 @@ def main() -> int:
                     trade_date=args.trade_date,
                     execute_mode=args.execute,
                     settings=cancel_settings,
+                    buy_signal_cleanup_settings=buy_signal_cleanup_settings,
+                    sell_signal_cleanup_settings=sell_signal_cleanup_settings,
                     lock_name=lock_name,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
@@ -375,6 +508,8 @@ def main() -> int:
                             trade_date=args.trade_date,
                             execute_mode=True,
                             settings=cancel_settings,
+                            buy_signal_cleanup_settings=buy_signal_cleanup_settings,
+                            sell_signal_cleanup_settings=sell_signal_cleanup_settings,
                             lock_name=lock_name,
                             lock_owner_id=lock_owner_id,
                             error_type=type(exc).__name__,
@@ -416,10 +551,16 @@ def main() -> int:
                     order_repo=order_repo,
                     order_service=order_service,
                 ),
+                stale_signal_cleanup_service=StaleExecutionSignalCleanupService(
+                    conn=conn,
+                    signal_repo=SignalRepository(conn),
+                ),
             )
             result = maintenance_service.run(
                 trade_date=args.trade_date,
                 stale_cancel_settings=cancel_settings,
+                buy_signal_cleanup_settings=buy_signal_cleanup_settings,
+                sell_signal_cleanup_settings=sell_signal_cleanup_settings,
                 execute_changes=args.execute,
             )
 
@@ -482,6 +623,40 @@ def main() -> int:
             "sell_cancel_skipped_count",
             str(result.stale_sell_cancel_result.skipped_count),
         )
+        if result.stale_buy_signal_cleanup_result is not None:
+            _ok(
+                "buy_signal_cleanup_candidate_count",
+                str(result.stale_buy_signal_cleanup_result.candidate_count),
+            )
+            _ok(
+                "buy_signal_cleanup_preview_ready_count",
+                str(result.stale_buy_signal_cleanup_result.preview_ready_count),
+            )
+            _ok(
+                "buy_signal_cleanup_cleaned_count",
+                str(result.stale_buy_signal_cleanup_result.cleaned_count),
+            )
+            _ok(
+                "buy_signal_cleanup_skipped_count",
+                str(result.stale_buy_signal_cleanup_result.skipped_count),
+            )
+        if result.stale_sell_signal_cleanup_result is not None:
+            _ok(
+                "sell_signal_cleanup_candidate_count",
+                str(result.stale_sell_signal_cleanup_result.candidate_count),
+            )
+            _ok(
+                "sell_signal_cleanup_preview_ready_count",
+                str(result.stale_sell_signal_cleanup_result.preview_ready_count),
+            )
+            _ok(
+                "sell_signal_cleanup_cleaned_count",
+                str(result.stale_sell_signal_cleanup_result.cleaned_count),
+            )
+            _ok(
+                "sell_signal_cleanup_skipped_count",
+                str(result.stale_sell_signal_cleanup_result.skipped_count),
+            )
 
         if result.manual_recovery_required_client_order_ids:
             _section("Manual Recovery Required")
@@ -548,6 +723,8 @@ def main() -> int:
                     trade_date=args.trade_date,
                     execute_mode=args.execute,
                     settings=cancel_settings,
+                    buy_signal_cleanup_settings=buy_signal_cleanup_settings,
+                    sell_signal_cleanup_settings=sell_signal_cleanup_settings,
                     result=result,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
@@ -571,6 +748,8 @@ def main() -> int:
                     trade_date=args.trade_date,
                     execute_mode=args.execute,
                     settings=cancel_settings,
+                    buy_signal_cleanup_settings=buy_signal_cleanup_settings,
+                    sell_signal_cleanup_settings=sell_signal_cleanup_settings,
                     lock_name=lock_name,
                     lock_owner_id=lock_owner_id,
                     lock_acquired=lock_acquired,

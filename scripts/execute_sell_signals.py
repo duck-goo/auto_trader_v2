@@ -94,6 +94,15 @@ def _parse_args() -> argparse.Namespace:
         help="Execution cutoff time HH:MM:SS. Default: 15:20:00",
     )
     parser.add_argument(
+        "--max-signal-age-seconds",
+        type=int,
+        default=300,
+        help=(
+            "Max allowed age for pending sell signals before execution. "
+            "Default: 300"
+        ),
+    )
+    parser.add_argument(
         "--signal-limit",
         type=int,
         default=200,
@@ -203,6 +212,7 @@ def _build_payload(
         "settings": {
             "start_time": settings.start_time,
             "cutoff_time": settings.cutoff_time,
+            "max_signal_age_seconds": settings.max_signal_age_seconds,
         },
         "signal_limit": signal_limit,
         "stop_reason": stop_reason,
@@ -265,6 +275,10 @@ def main() -> int:
     try:
         _validate_positive_int("signal_limit", args.signal_limit)
         _validate_positive_int("limit", args.limit)
+        _validate_positive_int(
+            "max_signal_age_seconds",
+            args.max_signal_age_seconds,
+        )
         if args.execute:
             _validate_positive_int("lock_lease_seconds", args.lock_lease_seconds)
 
@@ -273,6 +287,7 @@ def main() -> int:
         execution_settings = SellSignalExecutionSettings(
             start_time=args.start_time,
             cutoff_time=args.cutoff_time,
+            max_signal_age_seconds=args.max_signal_age_seconds,
         ).validated()
     except Exception as exc:
         _fail("startup", f"{type(exc).__name__}: {exc}")

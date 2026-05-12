@@ -71,6 +71,12 @@ def _require_time_text(name: str, value: str) -> str:
     return value
 
 
+def _require_optional_positive_int(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    return _require_positive_int(name, value)
+
+
 class SellSignalExecutionOutcome(str, enum.Enum):
     PREVIEW_READY = "PREVIEW_READY"
     BLOCKED = "BLOCKED"
@@ -84,10 +90,15 @@ class SellSignalExecutionOutcome(str, enum.Enum):
 class SellSignalExecutionSettings:
     start_time: str = "09:00:00"
     cutoff_time: str = "15:20:00"
+    max_signal_age_seconds: int | None = None
 
     def validated(self) -> "SellSignalExecutionSettings":
         start_time = _require_time_text("start_time", self.start_time)
         cutoff_time = _require_time_text("cutoff_time", self.cutoff_time)
+        max_signal_age_seconds = _require_optional_positive_int(
+            "max_signal_age_seconds",
+            self.max_signal_age_seconds,
+        )
         if start_time >= cutoff_time:
             raise ValueError(
                 "cutoff_time must be later than start_time: "
@@ -96,6 +107,7 @@ class SellSignalExecutionSettings:
         return SellSignalExecutionSettings(
             start_time=start_time,
             cutoff_time=cutoff_time,
+            max_signal_age_seconds=max_signal_age_seconds,
         )
 
 
@@ -451,6 +463,14 @@ class SellSignalExecutionService:
                 ),
             )
 
+        signal_age_block = self._evaluate_signal_age_guard(
+            candidate=candidate,
+            settings=settings,
+            observed_at=now,
+        )
+        if signal_age_block is not None:
+            return signal_age_block
+
         live_position = self._position_repo.get(candidate.symbol)
         if live_position is None or live_position.qty <= 0:
             return self._build_blocked_candidate(
@@ -572,6 +592,7 @@ class SellSignalExecutionService:
                     "trade_date": trade_date,
                     "source_signal_id": candidate.signal_id,
                     "source_strategy_name": candidate.source_strategy_name,
+                    "source_signal_scanned_at": candidate.signal_scanned_at,
                     "symbol": candidate.symbol,
                     "name": candidate.name,
                     "source_lot_id": candidate.lot_id,
@@ -589,6 +610,7 @@ class SellSignalExecutionService:
                     "order_error_message": execution_candidate.order_error_message,
                     "start_time": settings.start_time,
                     "cutoff_time": settings.cutoff_time,
+                    "max_signal_age_seconds": settings.max_signal_age_seconds,
                     **lot_audit_payload,
                 },
             )
@@ -669,6 +691,68 @@ class SellSignalExecutionService:
                 "Sell signal execution supports only the current KST trade_date: "
                 f"runtime_trade_date={runtime_trade_date}, trade_date={trade_date}"
             )
+
+    def _evaluate_signal_age_guard(
+        self,
+        *,
+        candidate: SellTriggerSignalCandidate,
+        settings: SellSignalExecutionSettings,
+        observed_at: datetime,
+    ) -> SellSignalExecutionCandidate | None:
+        if settings.max_signal_age_seconds is None:
+            return None
+
+        try:
+            signal_scanned_at = datetime.fromisoformat(candidate.signal_scanned_at)
+        except ValueError:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="INVALID_SIGNAL_SCANNED_AT",
+                reason_message=(
+                    "Signal scanned_at timestamp is invalid: "
+                    f"signal_scanned_at={candidate.signal_scanned_at!r}"
+                ),
+            )
+
+        if signal_scanned_at.tzinfo is None:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="INVALID_SIGNAL_SCANNED_AT",
+                reason_message=(
+                    "Signal scanned_at timestamp is missing timezone information: "
+                    f"signal_scanned_at={candidate.signal_scanned_at!r}"
+                ),
+            )
+
+        signal_scanned_at = signal_scanned_at.astimezone(_KST)
+        signal_age_seconds = int(
+            (observed_at.astimezone(_KST) - signal_scanned_at).total_seconds()
+        )
+        if signal_age_seconds < 0:
+            return self._build_blocked_candidate(
+                candidate=candidate,
+                reason_code="SIGNAL_TIMESTAMP_IN_FUTURE",
+                reason_message=(
+                    "Signal scanned_at timestamp is later than execution time: "
+                    f"signal_scanned_at={signal_scanned_at.isoformat()}, "
+                    f"executed_at={observed_at.astimezone(_KST).isoformat()}"
+                ),
+            )
+
+        if signal_age_seconds <= settings.max_signal_age_seconds:
+            return None
+
+        return self._build_blocked_candidate(
+            candidate=candidate,
+            reason_code="STALE_SIGNAL_AGE_EXCEEDED",
+            reason_message=(
+                "Signal age exceeded max_signal_age_seconds before sell execution: "
+                f"signal_age_seconds={signal_age_seconds}, "
+                f"max_signal_age_seconds={settings.max_signal_age_seconds}, "
+                f"signal_scanned_at={signal_scanned_at.isoformat()}, "
+                f"executed_at={observed_at.astimezone(_KST).isoformat()}"
+            ),
+        )
 
     @staticmethod
     def _build_blocked_candidate(
@@ -830,4 +914,7 @@ class SellSignalExecutionService:
         return candidate.reason_code in {
             "ENTRY_LOT_NOT_OPEN",
             "LIVE_POSITION_MISSING",
+            "STALE_SIGNAL_AGE_EXCEEDED",
+            "INVALID_SIGNAL_SCANNED_AT",
+            "SIGNAL_TIMESTAMP_IN_FUTURE",
         }

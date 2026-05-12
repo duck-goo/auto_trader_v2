@@ -25,6 +25,9 @@ from services.sell_signal_execution_service import (
     SellSignalExecutionSettings,
 )
 from services.stale_buy_order_cancel_service import StaleBuyOrderCancelSettings
+from services.stale_execution_signal_cleanup_service import (
+    StaleExecutionSignalCleanupSettings,
+)
 from services.timing2_30s_bar_build_service import (
     Timing2ThirtySecondBarBuildService,
 )
@@ -72,6 +75,8 @@ class IntradayTradingCycleResult:
 
 class IntradayTradingCycleService:
     """Run one conservative trading cycle using existing scan/execute services."""
+
+    _FAILED_STEP_REASON_MAX_LENGTH = 120
 
     def __init__(
         self,
@@ -136,6 +141,14 @@ class IntradayTradingCycleService:
             trade_date=trade_date,
             execute_actions=execute_actions,
             maintenance_settings=maintenance_settings,
+            buy_signal_cleanup_settings=self._build_signal_cleanup_settings(
+                max_signal_age_seconds=buy_execution_settings.max_signal_age_seconds,
+                signal_limit=buy_signal_limit,
+            ),
+            sell_signal_cleanup_settings=self._build_signal_cleanup_settings(
+                max_signal_age_seconds=sell_execution_settings.max_signal_age_seconds,
+                signal_limit=sell_signal_limit,
+            ),
         )
         intraday_bar_refresh_status = self._run_intraday_bar_refresh(
             trade_date=trade_date,
@@ -185,6 +198,7 @@ class IntradayTradingCycleService:
             execute_actions=execute_actions,
             maintenance_status=maintenance_status,
             sell_exit_scan_status=sell_exit_scan_status,
+            sell_macd_scan_status=sell_macd_scan_status,
             timing2_lot_exit_scan_status=timing2_lot_exit_scan_status,
         )
 
@@ -243,16 +257,33 @@ class IntradayTradingCycleService:
         trade_date: str,
         execute_actions: bool,
         maintenance_settings: StaleBuyOrderCancelSettings,
+        buy_signal_cleanup_settings: StaleExecutionSignalCleanupSettings | None,
+        sell_signal_cleanup_settings: StaleExecutionSignalCleanupSettings | None,
     ) -> IntradayTradingCycleStepStatus:
         try:
             result = self._order_maintenance_service.run(
                 trade_date=trade_date,
                 stale_cancel_settings=maintenance_settings,
+                buy_signal_cleanup_settings=buy_signal_cleanup_settings,
+                sell_signal_cleanup_settings=sell_signal_cleanup_settings,
                 execute_changes=execute_actions,
             )
         except Exception as exc:
             return self._failed(exc)
         return self._completed(result)
+
+    def _build_signal_cleanup_settings(
+        self,
+        *,
+        max_signal_age_seconds: int | None,
+        signal_limit: int,
+    ) -> StaleExecutionSignalCleanupSettings | None:
+        if max_signal_age_seconds is None:
+            return None
+        return StaleExecutionSignalCleanupSettings(
+            max_signal_age_seconds=max_signal_age_seconds,
+            signal_limit=signal_limit,
+        )
 
     def _run_timing2_lot_exit_scan(
         self,
@@ -421,17 +452,48 @@ class IntradayTradingCycleService:
         execute_actions: bool,
         maintenance_status: IntradayTradingCycleStepStatus,
         sell_exit_scan_status: IntradayTradingCycleStepStatus,
+        sell_macd_scan_status: IntradayTradingCycleStepStatus,
         timing2_lot_exit_scan_status: IntradayTradingCycleStepStatus,
     ) -> IntradayTradingCycleStepStatus:
         if execute_actions and maintenance_status.outcome == "FAILED":
             return self._skipped(
                 "Skipped because order maintenance failed before order execution."
             )
-        if sell_exit_scan_status.outcome == "FAILED":
+        sell_stop_scan_completed = sell_exit_scan_status.outcome == "COMPLETED"
+        sell_macd_scan_completed = sell_macd_scan_status.outcome == "COMPLETED"
+        timing2_lot_sell_scan_completed = (
+            timing2_lot_exit_scan_status.outcome == "COMPLETED"
+        )
+        if (
+            sell_exit_scan_status.outcome == "FAILED"
+            and sell_macd_scan_status.outcome == "FAILED"
+            and timing2_lot_exit_scan_status.outcome == "FAILED"
+        ):
+            detail_message = self._format_failed_step_reasons(
+                (
+                    ("sell stop-loss/take-profit", sell_exit_scan_status),
+                    ("sell MACD", sell_macd_scan_status),
+                    ("Timing2 lot-level sell", timing2_lot_exit_scan_status),
+                )
+            )
+            return self._skipped(
+                "Skipped because all sell scans failed: "
+                "sell stop-loss/take-profit, sell MACD, Timing2 lot-level sell. "
+                f"Details: {detail_message}"
+            )
+        if (
+            sell_exit_scan_status.outcome == "FAILED"
+            and not timing2_lot_sell_scan_completed
+            and not sell_macd_scan_completed
+        ):
             return self._skipped(
                 "Skipped because sell stop-loss/take-profit scan failed."
             )
-        if timing2_lot_exit_scan_status.outcome == "FAILED":
+        if (
+            timing2_lot_exit_scan_status.outcome == "FAILED"
+            and not sell_stop_scan_completed
+            and not sell_macd_scan_completed
+        ):
             return self._skipped(
                 "Skipped because Timing2 lot-level sell scan failed."
             )
@@ -554,6 +616,21 @@ class IntradayTradingCycleService:
         timing2_buy_scan_completed = (
             timing2_30s_trigger_scan_status.outcome == "COMPLETED"
         )
+        if (
+            buy_trigger_scan_status.outcome == "FAILED"
+            and timing2_30s_trigger_scan_status.outcome == "FAILED"
+        ):
+            detail_message = self._format_failed_step_reasons(
+                (
+                    ("buy trigger scan", buy_trigger_scan_status),
+                    ("Timing2 30-second trigger scan", timing2_30s_trigger_scan_status),
+                )
+            )
+            return self._skipped(
+                "Skipped because all buy scans failed: "
+                "buy trigger scan, Timing2 30-second trigger scan. "
+                f"Details: {detail_message}"
+            )
 
         if (
             execute_actions
@@ -644,6 +721,33 @@ class IntradayTradingCycleService:
             reason=reason,
             result=None,
         )
+
+    @staticmethod
+    def _format_failed_step_reasons(
+        items: tuple[tuple[str, IntradayTradingCycleStepStatus], ...],
+    ) -> str:
+        parts: list[str] = []
+        for label, status in items:
+            if status.outcome != "FAILED":
+                continue
+            reason = IntradayTradingCycleService._summarize_failed_step_reason(
+                status.reason or "unknown failure"
+            )
+            parts.append(f"{label}={reason}")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _summarize_failed_step_reason(reason: str) -> str:
+        normalized = " ".join(reason.split())
+        lowered = normalized.lower()
+        if lowered.startswith("runtimeerror:") and lowered.endswith(" unavailable"):
+            return "unavailable"
+        if lowered.startswith("missingtiming2setupsignalserror:"):
+            return "setup signals missing"
+        max_length = IntradayTradingCycleService._FAILED_STEP_REASON_MAX_LENGTH
+        if len(normalized) <= max_length:
+            return normalized
+        return normalized[: max_length - 3].rstrip() + "..."
 
     @staticmethod
     def _failed(exc: Exception) -> IntradayTradingCycleStepStatus:

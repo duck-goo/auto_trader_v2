@@ -189,15 +189,77 @@ export const sampleSnapshot = {
       status_level: "WARNING",
       highest_severity: "WARNING",
       manual_recovery_required_count: 2,
-      attention_flags: ["MANUAL_RECOVERY_REQUIRED"],
+      stale_signal_preview_ready_count: 3,
+      stale_signal_cleaned_count: 0,
+      stale_signal_blocked_count: 1,
+      stale_signal_symbol_hint: "005930, 000660, 035420, 051910",
+      stale_signal_blocked_reason_codes:
+        "INVALID_SIGNAL_SCANNED_AT, SIGNAL_TIMESTAMP_IN_FUTURE, STALE_SIGNAL_AGE_EXCEEDED, UNKNOWN_REASON",
+      attention_flags: [
+        "MANUAL_RECOVERY_REQUIRED",
+        "STALE_SIGNAL_CLEANUP_BLOCKED_ITEMS",
+      ],
     },
     order_maintenance_execute: {
       card_key: "recovery-maintenance-execute",
-      available: false,
-      status_level: "MISSING",
+      available: true,
+      status_level: "READY",
       highest_severity: "NONE",
-      manual_recovery_required_count: null,
+      manual_recovery_required_count: 0,
+      stale_signal_preview_ready_count: 0,
+      stale_signal_cleaned_count: 2,
+      stale_signal_blocked_count: 0,
+      stale_signal_symbol_hint: "005930, 000660, 035420, 051910",
+      stale_signal_blocked_reason_codes: null,
       attention_flags: [],
+    },
+    stale_signal_cleanup_review: {
+      card_key: "recovery-stale-signal-review",
+      available: true,
+      status_level: "WARNING",
+      highest_severity: "WARNING",
+      path:
+        "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\stale_signal_cleanup.review.json",
+      review_file_name: "stale_signal_cleanup.review.json",
+      source_label: "order_maintenance.execute",
+      source_path:
+        "C:\\python\\auto_trader_v2\\data\\ops\\2026-04-20\\order_maintenance.execute.json",
+      source_file_name: "order_maintenance.execute.json",
+      review_item_count: 5,
+      blocked_item_count: 2,
+      preview_ready_item_count: 2,
+      cleaned_item_count: 1,
+      top_symbols: "005930, 000660, 035420, 051910",
+      preview_items: [
+        {
+          scope: "buy",
+          symbol: "005930",
+          strategy_name: "buy_timing2_30s_morning_reclaim",
+          scanned_at: "2026-04-20T09:07:01+09:00",
+          outcome: "BLOCKED",
+          reason_code: "INVALID_SIGNAL_SCANNED_AT",
+          age_seconds: 421,
+        },
+        {
+          scope: "sell",
+          symbol: "000660",
+          strategy_name: "sell_stop_loss",
+          scanned_at: "2026-04-20T09:12:44+09:00",
+          outcome: "PREVIEW_READY",
+          reason_code: "STALE_SIGNAL_AGE_EXCEEDED",
+          age_seconds: 366,
+        },
+        {
+          scope: "sell",
+          symbol: "035420",
+          strategy_name: "sell_take_profit",
+          scanned_at: "2026-04-20T09:03:05+09:00",
+          outcome: "CLEANED",
+          reason_code: "STALE_SIGNAL_AGE_EXCEEDED",
+          age_seconds: 605,
+        },
+      ],
+      attention_flags: ["STALE_SIGNAL_CLEANUP_BLOCKED_ITEMS"],
     },
     execution_recovery_review: {
       card_key: "recovery-execution-review",
@@ -231,10 +293,11 @@ export const sampleSnapshot = {
   },
   actions: {
     required: true,
-    count: 3,
+    count: 4,
     top_action_codes: [
       "REVIEW_KILL_SWITCH",
       "REVIEW_SELL_EXECUTION_FAILURE",
+      "REVIEW_STALE_SIGNAL_CLEANUP",
       "REVIEW_EXECUTION_RECOVERY",
     ],
     items: [
@@ -255,6 +318,15 @@ export const sampleSnapshot = {
         detail: "BROKER_SELL_FAILED",
         suggested_command:
           ".\\venv\\Scripts\\python.exe scripts\\execute_sell_signals.py --trade-date 2026-04-20 --output .\\data\\ops\\2026-04-20\\execute_sell_signals.preview.json",
+      },
+      {
+        action_code: "REVIEW_STALE_SIGNAL_CLEANUP",
+        severity: "WARNING",
+        summary:
+          "Blocked stale signal cleanup 항목을 review JSON으로 다시 확인하세요.",
+        detail: "Stale signal cleanup blocked count=1 symbols=005930, 000660",
+        suggested_command:
+          ".\\venv\\Scripts\\python.exe scripts\\show_stale_signal_cleanup_review.py --trade-date 2026-04-20 --output .\\data\\ops\\2026-04-20\\stale_signal_cleanup.review.json",
       },
       {
         action_code: "REVIEW_EXECUTION_RECOVERY",

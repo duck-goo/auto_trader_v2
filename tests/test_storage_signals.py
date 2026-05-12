@@ -269,6 +269,25 @@ def test_list_unacted_excludes_acted(conn):
     assert ids == {a.id, c.id}
 
 
+def test_list_unacted_by_strategies_filters_and_orders(conn):
+    repo = SignalRepository(conn)
+    a, b, c, d = _seed(repo, conn)
+
+    with transaction(conn):
+        repo.mark_acted(a.id)
+
+    result = repo.list_unacted_by_strategies(("momo",))
+    ids = [row.id for row in result]
+    assert ids == [c.id, d.id]
+
+
+def test_list_unacted_by_strategies_returns_empty_for_empty_input(conn):
+    repo = SignalRepository(conn)
+    _seed(repo, conn)
+
+    assert repo.list_unacted_by_strategies(()) == []
+
+
 def test_list_respects_limit(conn):
     repo = SignalRepository(conn)
     _seed(repo, conn)

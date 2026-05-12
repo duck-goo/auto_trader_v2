@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
+import time
 
 import pandas as pd
 import pytz
@@ -25,6 +26,7 @@ from storage.repositories import (
 
 _log = get_logger("scan")
 _KST = pytz.timezone("Asia/Seoul")
+_RATE_LIMIT_MSG_CODES = frozenset({"EGW00201"})
 
 
 class IntradayBar15mRefreshOutcome(str, enum.Enum):
@@ -86,12 +88,26 @@ class IntradayBar15mRefreshService:
         position_repo: PositionRepository,
         intraday_bar_repo: IntradayBar15mRepository,
         now_fn: Callable[[], datetime] | None = None,
+        minute_candle_retry_count: int = 2,
+        minute_candle_retry_delay_seconds: float = 2.0,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         self._broker = broker
         self._conn = conn
         self._position_repo = position_repo
         self._intraday_bar_repo = intraday_bar_repo
         self._now_fn = now_fn or _default_now
+        self._minute_candle_retry_count = self._require_non_negative_int(
+            "minute_candle_retry_count",
+            minute_candle_retry_count,
+        )
+        self._minute_candle_retry_delay_seconds = (
+            self._require_non_negative_float(
+                "minute_candle_retry_delay_seconds",
+                minute_candle_retry_delay_seconds,
+            )
+        )
+        self._sleep_fn = sleep_fn or time.sleep
 
     def refresh_live_positions(
         self,
@@ -135,8 +151,8 @@ class IntradayBar15mRefreshService:
             existing_count = len(existing_rows)
 
             try:
-                minute_candles = self._broker.get_same_day_minute_candles(
-                    row.symbol,
+                minute_candles = self._load_same_day_minute_candles_with_retry(
+                    symbol=row.symbol,
                     end_time=query_end_time,
                 )
                 completed_df = resample_minute_candles_to_fixed_bars(
@@ -298,6 +314,49 @@ class IntradayBar15mRefreshService:
             candidates=tuple(candidates),
         )
 
+    def _load_same_day_minute_candles_with_retry(
+        self,
+        *,
+        symbol: str,
+        end_time: str,
+    ) -> pd.DataFrame:
+        max_attempts = self._minute_candle_retry_count + 1
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._broker.get_same_day_minute_candles(
+                    symbol,
+                    end_time=end_time,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_rate_limit_error(exc):
+                    raise
+                if attempt >= max_attempts:
+                    break
+                delay_seconds = (
+                    self._minute_candle_retry_delay_seconds * attempt
+                )
+                _log.warning(
+                    "[intraday_bar_refresh:retry] "
+                    f"symbol={symbol} attempt={attempt}/{max_attempts} "
+                    f"delay_seconds={delay_seconds:.1f} "
+                    f"reason={type(exc).__name__}: {exc}"
+                )
+                self._sleep_fn(delay_seconds)
+
+        assert last_exc is not None
+        raise last_exc
+
+    @staticmethod
+    def _is_retryable_rate_limit_error(exc: Exception) -> bool:
+        msg_code = getattr(exc, "msg_cd", None)
+        if isinstance(msg_code, str) and msg_code in _RATE_LIMIT_MSG_CODES:
+            return True
+        text = f"{type(exc).__name__}: {exc}"
+        return "EGW00201" in text or "초당 거래건수" in text
+
     @staticmethod
     def _require_trade_date(value: str) -> str:
         if not isinstance(value, str):
@@ -323,6 +382,18 @@ class IntradayBar15mRefreshService:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer: {value!r}")
         return value
+
+    @staticmethod
+    def _require_non_negative_int(name: str, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer: {value!r}")
+        return value
+
+    @staticmethod
+    def _require_non_negative_float(name: str, value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"{name} must be a non-negative number: {value!r}")
+        return float(value)
 
     @staticmethod
     def _validate_runtime_trade_date(
