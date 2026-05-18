@@ -13,7 +13,10 @@ import pytz
 
 from broker.base import BrokerInterface
 from market import UniverseMasterItem
-from market.kis_daily_universe_source import KisDailyUniverseSource
+from market.kis_daily_universe_source import (
+    KisDailyUniverseSkippedItem,
+    KisDailyUniverseSource,
+)
 from services.errors import ServiceError
 from services.market_master_query_service import MarketMasterQueryService
 from services.market_master_refresh_service import (
@@ -65,6 +68,8 @@ class PreopenUniverseResult:
     market_master_result: PreopenMarketMasterResult
     source_item_count: int
     universe_build_result: UniverseBuildResult
+    source_skipped_count: int = 0
+    source_skipped_items: tuple[KisDailyUniverseSkippedItem, ...] = ()
 
 
 def _default_now() -> datetime:
@@ -198,6 +203,7 @@ class PreopenUniverseService:
         daily_count: int = 40,
         write_universe: bool = False,
         allow_empty_save: bool = False,
+        skip_symbol_errors: bool = False,
     ) -> PreopenUniverseResult:
         trade_date = _require_trade_date(trade_date)
         if not isinstance(use_existing_market_master, bool):
@@ -213,6 +219,10 @@ class PreopenUniverseService:
         min_market_master_count = _normalize_min_market_master_count(
             min_market_master_count
         )
+        if not isinstance(skip_symbol_errors, bool):
+            raise ValueError(
+                f"skip_symbol_errors must be a bool: {skip_symbol_errors!r}"
+            )
 
         if use_existing_market_master:
             if master_items is not None:
@@ -249,6 +259,7 @@ class PreopenUniverseService:
             master_items=_rows_to_master_items(market_master_result.rows),
             trade_date=trade_date,
             daily_count=daily_count,
+            skip_symbol_errors=skip_symbol_errors,
         )
         source_items = source.load()
 
@@ -272,6 +283,8 @@ class PreopenUniverseService:
             market_master_result=market_master_result,
             source_item_count=len(source_items),
             universe_build_result=universe_build_result,
+            source_skipped_count=len(source.skipped_items),
+            source_skipped_items=source.skipped_items,
         )
 
     def _refresh_market_master(

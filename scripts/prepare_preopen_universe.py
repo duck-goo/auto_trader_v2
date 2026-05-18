@@ -199,6 +199,14 @@ def _parse_args() -> argparse.Namespace:
         help="Allow saving an empty snapshot when accepted_count is 0.",
     )
     parser.add_argument(
+        "--skip-symbol-errors",
+        action="store_true",
+        help=(
+            "Skip symbols whose KIS daily candles are unavailable and record "
+            "them in the output instead of aborting the whole preopen run."
+        ),
+    )
+    parser.add_argument(
         "--scan-timing1-setup",
         action="store_true",
         help=(
@@ -591,6 +599,19 @@ def _startup_check_result_to_payload(startup_check_result) -> dict[str, Any] | N
     }
 
 
+def _source_skipped_items_to_payload(result) -> list[dict[str, Any]]:
+    return [
+        {
+            "symbol": row.symbol,
+            "name": row.name,
+            "market": row.market,
+            "error_type": row.error_type,
+            "error_message": row.error_message,
+        }
+        for row in result.preopen_universe_result.source_skipped_items
+    ]
+
+
 def _build_timing1_setup_not_requested() -> Timing1SetupScanExecutionResult:
     return Timing1SetupScanExecutionResult(
         outcome=Timing1SetupScanOutcome.NOT_REQUESTED,
@@ -697,6 +718,8 @@ def _build_base_payload(
     input_validation_result: MarketMasterValidationResult | None,
     market_master_result: dict[str, Any] | None,
     source_item_count: int | None,
+    source_skipped_count: int | None,
+    source_skipped_items: list[dict[str, Any]] | None,
     universe_build_result: dict[str, Any] | None,
     startup_check_result: dict[str, Any] | None,
     timing1_setup_scan_outcome: str | None,
@@ -731,6 +754,8 @@ def _build_base_payload(
         ),
         "market_master_result": market_master_result,
         "source_item_count": source_item_count,
+        "source_skipped_count": source_skipped_count,
+        "source_skipped_items": source_skipped_items,
         "universe_build_result": universe_build_result,
         "startup_check_result": startup_check_result,
         "timing1_setup_scan_outcome": timing1_setup_scan_outcome,
@@ -769,6 +794,8 @@ def _build_validation_blocked_payload(
         input_validation_result=validation_result,
         market_master_result=None,
         source_item_count=None,
+        source_skipped_count=None,
+        source_skipped_items=None,
         universe_build_result=None,
         startup_check_result=None,
         timing1_setup_scan_outcome=None,
@@ -797,6 +824,8 @@ def _build_failure_payload(
     input_validation_result: MarketMasterValidationResult | None = None,
     market_master_result: dict[str, Any] | None = None,
     source_item_count: int | None = None,
+    source_skipped_count: int | None = None,
+    source_skipped_items: list[dict[str, Any]] | None = None,
     universe_build_result: dict[str, Any] | None = None,
     startup_check_result: dict[str, Any] | None = None,
     timing1_setup_scan_outcome: str | None = None,
@@ -823,6 +852,8 @@ def _build_failure_payload(
         input_validation_result=input_validation_result,
         market_master_result=market_master_result,
         source_item_count=source_item_count,
+        source_skipped_count=source_skipped_count,
+        source_skipped_items=source_skipped_items,
         universe_build_result=universe_build_result,
         startup_check_result=startup_check_result,
         timing1_setup_scan_outcome=timing1_setup_scan_outcome,
@@ -849,6 +880,8 @@ def _build_completed_payload(
     input_validation_result: MarketMasterValidationResult,
     market_master_result: dict[str, Any],
     source_item_count: int,
+    source_skipped_count: int,
+    source_skipped_items: list[dict[str, Any]],
     universe_build_result: dict[str, Any],
     startup_check_result: dict[str, Any] | None,
     timing1_setup_scan_outcome: str,
@@ -873,6 +906,8 @@ def _build_completed_payload(
         input_validation_result=input_validation_result,
         market_master_result=market_master_result,
         source_item_count=source_item_count,
+        source_skipped_count=source_skipped_count,
+        source_skipped_items=source_skipped_items,
         universe_build_result=universe_build_result,
         startup_check_result=startup_check_result,
         timing1_setup_scan_outcome=timing1_setup_scan_outcome,
@@ -1244,6 +1279,7 @@ def main() -> int:
     _ok("min_master_count", str(args.min_master_count))
     _ok("allow_unresolved_orders", str(args.allow_unresolved_orders))
     _ok("allow_empty_save", str(args.allow_empty_save))
+    _ok("skip_symbol_errors", str(args.skip_symbol_errors))
     _ok("scan_timing1_setup", str(args.scan_timing1_setup))
     _ok("write_timing1_signals", str(args.write_timing1_signals))
     _ok("timing1_daily_count", str(args.timing1_daily_count))
@@ -1373,6 +1409,7 @@ def main() -> int:
                 run_startup_check=args.run_startup_check,
                 allow_unresolved_orders=args.allow_unresolved_orders,
                 allow_empty_save=args.allow_empty_save,
+                skip_symbol_errors=args.skip_symbol_errors,
             )
             timing1_setup_scan_execution = _run_timing1_setup_scan(
                 scan_requested=args.scan_timing1_setup,
@@ -1426,6 +1463,16 @@ def main() -> int:
                     None
                     if "result" not in locals()
                     else result.preopen_universe_result.source_item_count
+                ),
+                source_skipped_count=(
+                    None
+                    if "result" not in locals()
+                    else result.preopen_universe_result.source_skipped_count
+                ),
+                source_skipped_items=(
+                    None
+                    if "result" not in locals()
+                    else _source_skipped_items_to_payload(result)
                 ),
                 universe_build_result=(
                     None
@@ -1519,6 +1566,10 @@ def main() -> int:
 
     _section("Universe Result")
     _ok("source_item_count", str(result.preopen_universe_result.source_item_count))
+    _ok(
+        "source_skipped_count",
+        str(result.preopen_universe_result.source_skipped_count),
+    )
     _ok("total_count", str(filter_result.total_count))
     _ok("accepted_count", str(filter_result.accepted_count))
     _ok("rejected_count", str(filter_result.rejected_count))
@@ -1540,6 +1591,16 @@ def main() -> int:
             reason_text = ",".join(reason.value for reason in rejected.reasons)
             item = rejected.item
             print(f"{item.symbol} name={item.name} reasons={reason_text}")
+
+    if result.preopen_universe_result.source_skipped_items:
+        _section("Source Skipped")
+        for item in result.preopen_universe_result.source_skipped_items[
+            : max(0, args.limit)
+        ]:
+            print(
+                f"{item.symbol} name={item.name} market={item.market} "
+                f"error_type={item.error_type} error_message={item.error_message}"
+            )
 
     if build_result.reason:
         _warn("build_reason", build_result.reason)
@@ -1623,6 +1684,8 @@ def main() -> int:
                 required_markets=list(args.required_market),
             ),
             source_item_count=result.preopen_universe_result.source_item_count,
+            source_skipped_count=result.preopen_universe_result.source_skipped_count,
+            source_skipped_items=_source_skipped_items_to_payload(result),
             universe_build_result=_universe_build_result_to_payload(build_result),
             startup_check_result=_startup_check_result_to_payload(
                 result.startup_check_result

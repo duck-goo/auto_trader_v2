@@ -39,6 +39,15 @@ if TYPE_CHECKING:
     from broker.kis.models import Balance, OrderInfo, PriceSnapshot
 
 
+def _mask_account_no(account_no: str) -> str:
+    if not isinstance(account_no, str):
+        return "***"
+    parts = account_no.split("-", 1)
+    if len(parts) != 2 or len(parts[0]) < 4:
+        return "***"
+    return f"{parts[0][:4]}****-**"
+
+
 class KisBroker(BrokerInterface):
     """
     KIS 브로커 Facade.
@@ -63,7 +72,7 @@ class KisBroker(BrokerInterface):
 
         self._log.info(
             f"KisBroker 초기화 완료 (mode={settings.mode}, "
-            f"account={settings.kis_account_no})"
+            f"account={_mask_account_no(settings.kis_account_no)})"
         )
 
     # ============================================================

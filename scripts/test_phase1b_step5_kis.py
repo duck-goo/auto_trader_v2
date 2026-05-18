@@ -57,6 +57,7 @@ def main() -> int:
     from broker.kis import KisBroker
     from broker.kis.models import OrderStatus
     from broker.kis.errors import KisApiError, KisOrderError
+    from market import round_down_to_krx_tick
 
     settings = load_settings()
     setup_logging(settings)
@@ -77,7 +78,10 @@ def main() -> int:
         broker.close()
         return 1
 
-    limit_price = int(snap.price * 0.95 // 100 * 100)
+    limit_price = round_down_to_krx_tick(
+        market="KOSPI",
+        price=int(snap.price * 0.95),
+    )
     if limit_price <= 0:
         limit_price = snap.price
     _ok("현재가 조회",

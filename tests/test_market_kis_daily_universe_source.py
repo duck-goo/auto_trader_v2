@@ -174,6 +174,43 @@ def test_kis_daily_universe_source_rejects_missing_trade_value_column():
         source.load()
 
 
+def test_kis_daily_universe_source_can_skip_symbol_errors():
+    df = _daily_df()
+    df = df.drop(columns=["trade_value"])
+    broker = FakeBroker(
+        {
+            "005930": _daily_df(count=30),
+            "000020": df,
+        }
+    )
+    source = KisDailyUniverseSource(
+        broker=broker,
+        master_items=[
+            UniverseMasterItem(
+                symbol="005930",
+                name="Samsung Electronics",
+                market="KOSPI",
+            ),
+            UniverseMasterItem(
+                symbol="000020",
+                name="Bad Data",
+                market="KOSPI",
+            ),
+        ],
+        trade_date="2026-04-14",
+        daily_count=40,
+        skip_symbol_errors=True,
+    )
+
+    items = source.load()
+
+    assert [item.symbol for item in items] == ["005930"]
+    assert len(source.skipped_items) == 1
+    assert source.skipped_items[0].symbol == "000020"
+    assert source.skipped_items[0].error_type == "ValueError"
+    assert "missing required columns" in source.skipped_items[0].error_message
+
+
 def test_kis_daily_universe_source_rejects_bad_trade_date():
     broker = FakeBroker({"005930": _daily_df()})
 

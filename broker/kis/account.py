@@ -18,6 +18,15 @@ from config.loader import Settings
 from logger import get_logger
 
 
+def _mask_account_no(account_no: str) -> str:
+    if not isinstance(account_no, str):
+        return "***"
+    parts = account_no.split("-", 1)
+    if len(parts) != 2 or len(parts[0]) < 4:
+        return "***"
+    return f"{parts[0][:4]}****-**"
+
+
 class Account:
     """
     계좌 조회.
@@ -69,7 +78,9 @@ class Account:
             "CTX_AREA_NK100": "",
         }
 
-        self._log.debug(f"잔고 조회 요청: {self._settings.kis_account_no}")
+        self._log.debug(
+            f"잔고 조회 요청: {_mask_account_no(self._settings.kis_account_no)}"
+        )
         response = self._client.request_get(
             path=PATH_INQUIRE_BALANCE,
             tr_id=TR_ID_INQUIRE_BALANCE,

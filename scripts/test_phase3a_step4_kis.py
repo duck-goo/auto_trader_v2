@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 DEFAULT_CODE = "005930"
+DEFAULT_MARKET = "KOSPI"
 DEFAULT_QTY = 1
 DEFAULT_DISCOUNT_BPS = 500
 DEFAULT_SLEEP_SECONDS = 1.5
@@ -112,6 +113,17 @@ def _resolve_limit_price(
     if explicit_price is not None:
         if explicit_price <= 0:
             raise ValueError(f"--limit-price must be > 0: {explicit_price!r}")
+        from market import round_down_to_krx_tick
+
+        rounded_explicit = round_down_to_krx_tick(
+            market=DEFAULT_MARKET,
+            price=explicit_price,
+        )
+        if rounded_explicit != explicit_price:
+            raise ValueError(
+                "--limit-price must match KRX tick size. "
+                f"received={explicit_price}, nearest_down={rounded_explicit}"
+            )
         return explicit_price
 
     if code != DEFAULT_CODE:
@@ -132,10 +144,9 @@ def _resolve_limit_price(
             f"discount_bps={discount_bps}"
         )
 
-    # Default script is tuned for Samsung Electronics (005930),
-    # whose tick size is 100 KRW around the typical trading range.
-    rounded = max(100, (discounted // 100) * 100)
-    return rounded
+    from market import round_down_to_krx_tick
+
+    return round_down_to_krx_tick(market=DEFAULT_MARKET, price=discounted)
 
 
 def _describe_order_row(row) -> str:

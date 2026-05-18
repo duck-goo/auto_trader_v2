@@ -245,6 +245,105 @@ def test_main_execute_success_runs_preopen_then_polling_and_passes_risk_flags(
     assert payload["polling_exit_code"] == 0
 
 
+def test_main_can_reuse_existing_universe_and_run_startup_only(
+    test_db_path,
+    monkeypatch,
+):
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_reuse_universe.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=["--preopen-reuse-existing-universe"],
+    )
+
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(target, "load_settings", lambda: _make_settings(test_db_path))
+    monkeypatch.setattr(target, "setup_logging", lambda settings: None)
+    _install_fixed_tempdir(
+        monkeypatch,
+        test_db_path=test_db_path,
+        suffix="session_temp_reuse_universe",
+    )
+
+    def fake_run_child(command: list[str]) -> int:
+        commands.append(command)
+        script_name = Path(command[1]).name
+        if script_name == "startup_check.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "outcome": "READY",
+                    "reason": None,
+                    "universe_snapshot": {
+                        "exists": True,
+                        "candidate_count": 1335,
+                        "refreshed_at": "2026-04-20T08:31:00+09:00",
+                    },
+                    "reconcile_changed_rows": 0,
+                    "unresolved_orders": [],
+                    "live_positions": [],
+                },
+            )
+            return 0
+        if script_name == "run_intraday_trading_polling.py":
+            _write_child_output(
+                command,
+                {
+                    "trade_date": TRADE_DATE,
+                    "stop_reason": "MAX_CYCLES_REACHED",
+                },
+            )
+            return 0
+        raise AssertionError(f"Unexpected child script: {command}")
+
+    monkeypatch.setattr(target, "_run_child", fake_run_child)
+
+    exit_code = target.main()
+
+    assert exit_code == 0
+    assert [Path(command[1]).name for command in commands] == [
+        "startup_check.py",
+        "run_intraday_trading_polling.py",
+    ]
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["session_outcome"] == "COMPLETED"
+    assert payload["preopen_result"]["preopen_reuse_existing_universe"] is True
+    assert payload["preopen_result"]["readiness_outcome"] == "READY"
+    assert (
+        payload["preopen_result"]["startup_check_result"]["universe_snapshot"][
+            "candidate_count"
+        ]
+        == 1335
+    )
+
+
+def test_main_rejects_preopen_reuse_with_setup_scan_flags(
+    test_db_path,
+    monkeypatch,
+):
+    output_path = test_db_path.with_name(
+        f"{test_db_path.stem}_session_reuse_conflict.json"
+    )
+    _set_cli_args(
+        monkeypatch,
+        output_path=output_path,
+        extra_args=[
+            "--preopen-reuse-existing-universe",
+            "--preopen-scan-timing1-setup",
+        ],
+    )
+
+    exit_code = target.main()
+
+    assert exit_code == 5
+    assert not output_path.exists()
+
+
 def test_main_stops_before_polling_when_preopen_is_blocked(
     test_db_path,
     monkeypatch,

@@ -93,6 +93,7 @@ class PreopenReadinessService:
         daily_count: int = 40,
         write_universe: bool = False,
         allow_empty_save: bool = False,
+        skip_symbol_errors: bool = False,
         run_startup_check: bool = False,
         allow_unresolved_orders: bool = False,
     ) -> PreopenReadinessResult:
@@ -101,6 +102,10 @@ class PreopenReadinessService:
         if not isinstance(allow_empty_save, bool):
             raise ValueError(
                 f"allow_empty_save must be a bool: {allow_empty_save!r}"
+            )
+        if not isinstance(skip_symbol_errors, bool):
+            raise ValueError(
+                f"skip_symbol_errors must be a bool: {skip_symbol_errors!r}"
             )
         if not isinstance(run_startup_check, bool):
             raise ValueError(
@@ -140,6 +145,7 @@ class PreopenReadinessService:
             daily_count=daily_count,
             write_universe=write_universe,
             allow_empty_save=allow_empty_save,
+            skip_symbol_errors=skip_symbol_errors,
         )
 
         if not run_startup_check:

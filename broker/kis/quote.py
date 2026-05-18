@@ -8,6 +8,7 @@ KisClient를 사용해 시세를 조회하고 parsers로 도메인 모델로 변
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -34,6 +35,7 @@ from logger import get_logger
 _CODE_PATTERN = re.compile(r"^\d{6}$")
 _TIME_PATTERN = re.compile(r"^\d{6}$")
 _KST = pytz.timezone("Asia/Seoul")
+_SAME_DAY_MINUTE_BACKFILL_WINDOW_DELAY_SECONDS = 0.7
 
 
 def _validate_code(code: str) -> None:
@@ -48,6 +50,18 @@ def _validate_hms(name: str, value: str) -> str:
     if not isinstance(value, str) or not _TIME_PATTERN.match(value):
         raise ValueError(f"{name} must be HHMMSS digits: {value!r}")
     return value
+
+
+def _filter_candles_to_kst_date(
+    df: "pd.DataFrame",
+    target_date,
+) -> "pd.DataFrame":
+    if df.empty or "datetime" not in df.columns:
+        return df
+    same_day_mask = df["datetime"].map(
+        lambda value: value.astimezone(_KST).date() == target_date
+    )
+    return df.loc[same_day_mask].reset_index(drop=True)
 
 
 class Quote:
@@ -194,6 +208,7 @@ class Quote:
             datetime.now(_KST).strftime("%H%M%S") if end_time is None else end_time
         )
         normalized_end_time = _validate_hms("end_time", requested_end_time)
+        target_date = datetime.now(_KST).date()
 
         frames: list[pd.DataFrame] = []
         query_end_time = normalized_end_time
@@ -214,6 +229,7 @@ class Quote:
                 end_time=query_end_time,
                 include_past_data=True,
             )
+            window = _filter_candles_to_kst_date(window, target_date)
             if window.empty:
                 break
             frames.append(window)
@@ -229,6 +245,7 @@ class Quote:
             if next_query_dt.strftime("%H%M%S") < market_open_time:
                 break
             query_end_time = next_query_dt.strftime("%H%M%S")
+            time.sleep(_SAME_DAY_MINUTE_BACKFILL_WINDOW_DELAY_SECONDS)
         else:
             raise RuntimeError(
                 f"KIS minute backfill exceeded {max_windows} windows: code={code}"

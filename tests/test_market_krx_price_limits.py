@@ -8,6 +8,7 @@ from market import (
     calculate_krx_price_limit_amount,
     calculate_krx_upper_price_limit,
     get_krx_tick_size,
+    round_down_to_krx_tick,
 )
 
 
@@ -34,6 +35,11 @@ def test_kospi_and_kosdaq_share_same_stock_tick_rules_in_current_table():
         market="KOSDAQ",
         base_price=109_500,
     ) == 142_300
+
+
+def test_round_down_to_krx_tick_uses_current_price_band():
+    assert round_down_to_krx_tick(market="KOSPI", price=250_800) == 250_500
+    assert round_down_to_krx_tick(market="KOSDAQ", price=9_947) == 9_940
 
 
 def test_price_limit_helpers_reject_unknown_market():

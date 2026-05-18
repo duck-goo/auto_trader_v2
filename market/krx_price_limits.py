@@ -53,6 +53,19 @@ def get_krx_tick_size(*, market: str, price: int) -> int:
     return 1_000
 
 
+def round_down_to_krx_tick(*, market: str, price: int) -> int:
+    """
+    Round a stock price down to the nearest valid KRX tick.
+
+    Use this for conservative buy-limit test prices. Production market orders
+    still use price=0 and do not need tick rounding.
+    """
+
+    normalized_price = _require_positive_price("price", price)
+    tick_size = get_krx_tick_size(market=market, price=normalized_price)
+    return (normalized_price // tick_size) * tick_size
+
+
 def calculate_krx_price_limit_amount(*, market: str, base_price: int) -> int:
     """
     Calculate the daily price-limit amount from the base price.

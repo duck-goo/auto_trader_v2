@@ -79,6 +79,14 @@ def _split_account_no(account_no: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+def _mask_account_no(account_no: str) -> str:
+    """Return a log-safe account number mask."""
+    m = _ACCOUNT_PATTERN.match(account_no)
+    if not m:
+        return "***"
+    return f"{m.group(1)[:4]}****-**"
+
+
 def _validate_order_inputs(
     code: str,
     side: str,
@@ -150,7 +158,7 @@ class Order:
         )
 
         self._log.info(
-            f"Order 초기화: account={settings.kis_account_no}, "
+            f"Order 초기화: account={_mask_account_no(settings.kis_account_no)}, "
             f"mode={settings.mode}"
         )
 

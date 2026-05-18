@@ -8,6 +8,8 @@ Flow:
 Safety:
 - This launcher reuses the existing preopen and polling scripts instead of
   duplicating business logic.
+- When --preopen-reuse-existing-universe is set, the launcher runs only the
+  startup gate before polling and relies on a universe snapshot prepared earlier.
 - Preview mode still writes the universe snapshot during preopen because the
   later polling phase depends on persisted universe/startup state.
 - Execute mode checks whether another trading polling loop is already running
@@ -162,6 +164,22 @@ def _parse_args() -> argparse.Namespace:
         "--allow-empty-save",
         action="store_true",
         help="Allow saving an empty universe snapshot when accepted_count is 0.",
+    )
+    parser.add_argument(
+        "--preopen-skip-symbol-errors",
+        action="store_true",
+        help=(
+            "Skip symbols whose KIS daily candles are unavailable during "
+            "preopen universe preparation."
+        ),
+    )
+    parser.add_argument(
+        "--preopen-reuse-existing-universe",
+        action="store_true",
+        help=(
+            "Skip universe rebuild and run only startup_check.py against the "
+            "already saved universe snapshot."
+        ),
     )
     parser.add_argument(
         "--preopen-scan-timing1-setup",
@@ -671,6 +689,8 @@ def _build_preopen_command(
         command.append("--allow-unresolved-orders")
     if args.allow_empty_save:
         command.append("--allow-empty-save")
+    if args.preopen_skip_symbol_errors:
+        command.append("--skip-symbol-errors")
     if args.preopen_scan_timing1_setup:
         command.append("--scan-timing1-setup")
     if args.preopen_write_timing1_signals:
@@ -692,6 +712,58 @@ def _build_preopen_command(
         ]
     )
     return command
+
+
+def _build_startup_check_command(
+    *,
+    args: argparse.Namespace,
+    db_path: str,
+    output_path: Path,
+) -> list[str]:
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "startup_check.py"),
+        "--trade-date",
+        args.trade_date,
+        "--db-path",
+        db_path,
+        "--output",
+        str(output_path),
+    ]
+    if args.allow_unresolved_orders:
+        command.append("--allow-unresolved-orders")
+    return command
+
+
+def _startup_result_to_reused_preopen_result(
+    payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    outcome = payload.get("outcome")
+    reason = (
+        payload.get("reason")
+        or payload.get("reconcile_reason_message")
+        or payload.get("reconcile_reason_code")
+    )
+    return {
+        "trade_date": payload.get("trade_date"),
+        "readiness_outcome": outcome,
+        "readiness_reason": reason,
+        "preopen_reuse_existing_universe": True,
+        "startup_check_result": payload,
+        "market_master_result": None,
+        "universe_build_result": None,
+        "source_item_count": None,
+        "source_skipped_count": None,
+        "source_skipped_items": [],
+        "timing1_setup_scan_outcome": "NOT_REQUESTED",
+        "timing1_setup_scan_reason": None,
+        "timing1_setup_scan_result": None,
+        "timing2_setup_scan_outcome": "NOT_REQUESTED",
+        "timing2_setup_scan_reason": None,
+        "timing2_setup_scan_result": None,
+    }
 
 
 def _build_polling_command(
@@ -883,6 +955,28 @@ def _check_master_source_args(args: argparse.Namespace) -> None:
         )
 
 
+def _check_preopen_reuse_args(args: argparse.Namespace) -> None:
+    if not args.preopen_reuse_existing_universe:
+        return
+
+    blocked_flags: list[str] = []
+    if args.preopen_scan_timing1_setup:
+        blocked_flags.append("--preopen-scan-timing1-setup")
+    if args.preopen_write_timing1_signals:
+        blocked_flags.append("--preopen-write-timing1-signals")
+    if args.preopen_scan_timing2_setup:
+        blocked_flags.append("--preopen-scan-timing2-setup")
+    if args.preopen_write_timing2_signals:
+        blocked_flags.append("--preopen-write-timing2-signals")
+
+    if blocked_flags:
+        raise ValueError(
+            "--preopen-reuse-existing-universe cannot be combined with "
+            + ", ".join(blocked_flags)
+            + ". Run a full preopen preparation when setup signals must be rebuilt."
+        )
+
+
 def _precheck_polling_lock(
     *,
     execute_mode: bool,
@@ -918,6 +1012,7 @@ def main() -> int:
 
     try:
         _check_master_source_args(args)
+        _check_preopen_reuse_args(args)
         effective_buy_strategy = _resolve_effective_buy_strategy(args)
         run_timing1, run_timing2 = _resolve_scan_selection(
             args,
@@ -1030,6 +1125,7 @@ def main() -> int:
         _ok("buy_strategy_selection_path", effective_buy_strategy.selection_path)
     _ok("db_path", str(db_path))
     _ok("polling_lock_name", polling_lock_name)
+    _ok("preopen_reuse_existing_universe", str(args.preopen_reuse_existing_universe))
     _ok(
         "max_daily_order_count",
         "-" if args.max_daily_order_count is None else str(args.max_daily_order_count),
@@ -1038,7 +1134,13 @@ def main() -> int:
         "max_daily_loss",
         "-" if args.max_daily_loss is None else str(args.max_daily_loss),
     )
-    if not args.execute:
+    if args.preopen_reuse_existing_universe:
+        _warn(
+            "session_note",
+            "Preopen will reuse the existing universe snapshot and run only "
+            "startup_check.py before polling.",
+        )
+    elif not args.execute:
         _warn(
             "session_note",
             "Preopen still writes universe/startup state even in preview mode "
@@ -1130,15 +1232,29 @@ def main() -> int:
         preopen_output_path = temp_dir / "preopen_result.json"
         polling_output_path = temp_dir / "polling_result.json"
 
-        preopen_command = _build_preopen_command(
-            args=args,
-            db_path=str(db_path),
-            output_path=preopen_output_path,
-        )
+        if args.preopen_reuse_existing_universe:
+            preopen_command = _build_startup_check_command(
+                args=args,
+                db_path=str(db_path),
+                output_path=preopen_output_path,
+            )
+            preopen_script_name = "startup_check.py"
+        else:
+            preopen_command = _build_preopen_command(
+                args=args,
+                db_path=str(db_path),
+                output_path=preopen_output_path,
+            )
+            preopen_script_name = "prepare_preopen_universe.py"
         _section("Preopen Launch")
-        _ok("script", "prepare_preopen_universe.py")
+        _ok("script", preopen_script_name)
         preopen_exit_code = _run_child(preopen_command)
-        preopen_result = _load_json(preopen_output_path)
+        raw_preopen_result = _load_json(preopen_output_path)
+        preopen_result = (
+            _startup_result_to_reused_preopen_result(raw_preopen_result)
+            if args.preopen_reuse_existing_universe
+            else raw_preopen_result
+        )
 
         readiness_outcome = (
             None if preopen_result is None else preopen_result.get("readiness_outcome")

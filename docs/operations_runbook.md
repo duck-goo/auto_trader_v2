@@ -88,6 +88,47 @@
 New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
 ```
 
+### 3-1-1. 종목 마스터 갱신
+- 장전 준비 전에 KRX 기준 KOSPI/KOSDAQ 종목 마스터를 먼저 갱신한다.
+- `symbol_count` 가 최소 기준보다 작거나 KOSPI/KOSDAQ 중 하나가 없으면 다음 단계로 가지 않는다.
+
+```powershell
+.\venv\Scripts\python.exe scripts\refresh_market_master_from_krx.py `
+  --min-symbol-count 2000 `
+  --required-market KOSPI `
+  --required-market KOSDAQ `
+  --output .\data\ops\YYYY-MM-DD\market_master.refresh.json
+```
+
+```powershell
+.\venv\Scripts\python.exe scripts\show_market_master.py `
+  --trade-date YYYY-MM-DD `
+  --require-same-day `
+  --min-symbol-count 2000 `
+  --output .\data\ops\YYYY-MM-DD\market_master.health.json
+```
+
+- 전체 종목 기준 1차 필터 풀은 시간이 걸리므로 진행률형 스크립트로 만든다.
+- 중간에 멈추면 같은 명령을 다시 실행해 JSONL 캐시 기준으로 이어간다.
+
+```powershell
+.\venv\Scripts\python.exe scripts\build_preopen_universe_progress.py `
+  --trade-date YYYY-MM-DD `
+  --require-same-day-master `
+  --min-master-count 2000 `
+  --required-market KOSPI `
+  --required-market KOSDAQ `
+  --daily-count 40 `
+  --daily-source naver `
+  --skip-symbol-errors `
+  --symbol-delay-seconds 0.05 `
+  --write-universe `
+  --output .\data\ops\YYYY-MM-DD\preopen_universe.full.json
+```
+
+- `--daily-source naver` 는 빠른 보조 경로다. 거래대금은 공식 거래대금이 아니라 일중 평균가격과 거래량으로 추정한다.
+- 공식 KIS 일봉으로 검증할 때는 `--daily-source kis` 를 쓰되, 전체 종목에는 시간이 오래 걸린다.
+
 ### 3-2. 장 시작 전 점검
 - 가장 먼저 startup gate 결과를 본다.
 - `READY` 가 아니면 장중 세션을 시작하지 않는다.
@@ -108,10 +149,17 @@ New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
 - 먼저 preview로 같은 파라미터를 확인한다.
 - 아래 예시는 Timing2 수정안 기준이다. Timing1만 쓸 때는 Timing2 옵션을 빼고 `--buy-strategy timing1` 을 사용한다.
 - `--buy-strategy timing2` 또는 `both` 를 명시하면 `--preopen-scan-timing2-setup` 과 `--preopen-write-timing2-signals` 가 반드시 필요하다.
+- 위 3-1-1에서 유니버스를 이미 저장했고 사전 신호 스캔을 새로 만들지 않을 때만 `--preopen-reuse-existing-universe` 를 추가해 빠르게 시작한다.
+- `--preopen-reuse-existing-universe` 는 `--preopen-scan-timing1-setup`, `--preopen-scan-timing2-setup` 과 같이 쓰지 않는다.
 
 ```powershell
 .\venv\Scripts\python.exe scripts\run_trading_session.py `
   --use-db-master `
+  --require-same-day-master `
+  --min-master-count 2000 `
+  --required-market KOSPI `
+  --required-market KOSDAQ `
+  --preopen-skip-symbol-errors `
   --trade-date YYYY-MM-DD `
   --per-order-budget 1000000 `
   --max-holdings 3 `
@@ -134,6 +182,11 @@ New-Item -ItemType Directory -Force .\data\ops\YYYY-MM-DD | Out-Null
 ```powershell
 .\venv\Scripts\python.exe scripts\run_trading_session.py `
   --use-db-master `
+  --require-same-day-master `
+  --min-master-count 2000 `
+  --required-market KOSPI `
+  --required-market KOSDAQ `
+  --preopen-skip-symbol-errors `
   --trade-date YYYY-MM-DD `
   --per-order-budget 1000000 `
   --max-holdings 3 `

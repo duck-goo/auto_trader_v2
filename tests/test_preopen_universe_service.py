@@ -266,6 +266,48 @@ def test_prepare_write_saves_universe_snapshot(test_db_path):
         conn.close()
 
 
+def test_prepare_can_skip_symbol_level_daily_data_errors(test_db_path):
+    conn = _make_conn(test_db_path)
+    try:
+        service = PreopenUniverseService(
+            conn=conn,
+            market_master_repo=MarketMasterRepository(conn),
+            universe_repo=UniverseCandidateRepository(conn),
+            now_fn=_fixed_now(),
+        )
+        bad_df = _daily_df(close_price=180000, trade_value=410_000_000_000)
+        bad_df = bad_df.drop(columns=["trade_value"])
+        broker = FakeBroker(
+            {
+                "035420": _daily_df(
+                    close_price=180000,
+                    trade_value=410_000_000_000,
+                ),
+                "069500": bad_df,
+            }
+        )
+
+        result = service.prepare(
+            broker=broker,
+            trade_date=TRADE_DATE,
+            master_items=_master_items(),
+            filter_settings=_settings(),
+            write_universe=True,
+            skip_symbol_errors=True,
+        )
+
+        assert result.source_item_count == 1
+        assert result.source_skipped_count == 1
+        assert result.source_skipped_items[0].symbol == "069500"
+        assert result.universe_build_result.outcome == UniverseBuildOutcome.SAVED
+        assert [
+            row.symbol
+            for row in UniverseCandidateRepository(conn).list_for_date(TRADE_DATE)
+        ] == ["035420"]
+    finally:
+        conn.close()
+
+
 def test_prepare_skips_empty_save_and_keeps_existing_universe(test_db_path):
     conn = _make_conn(test_db_path)
     try:

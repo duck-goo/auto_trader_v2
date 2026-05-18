@@ -79,6 +79,8 @@ def test_build_validation_blocked_payload_has_expected_shape():
     assert payload["required_markets"] == ["KONEX"]
     assert payload["market_master_result"] is None
     assert payload["source_item_count"] is None
+    assert payload["source_skipped_count"] is None
+    assert payload["source_skipped_items"] is None
     assert payload["universe_build_result"] is None
     assert payload["startup_check_result"] is None
     assert payload["timing1_setup_scan_outcome"] is None
@@ -138,6 +140,8 @@ def test_build_failure_payload_has_expected_shape():
         "input_validation_result": None,
         "market_master_result": None,
         "source_item_count": None,
+        "source_skipped_count": None,
+        "source_skipped_items": None,
         "universe_build_result": None,
         "startup_check_result": None,
         "timing1_setup_scan_outcome": None,
@@ -183,6 +187,16 @@ def test_build_completed_payload_has_expected_shape():
             "symbol_count": 4,
         },
         source_item_count=4,
+        source_skipped_count=1,
+        source_skipped_items=[
+            {
+                "symbol": "000020",
+                "name": "Bad Data",
+                "market": "KOSPI",
+                "error_type": "ValueError",
+                "error_message": "missing daily candles",
+            }
+        ],
         universe_build_result={
             "build_outcome": "DRY_RUN",
         },
@@ -225,6 +239,16 @@ def test_build_completed_payload_has_expected_shape():
             "symbol_count": 4,
         },
         "source_item_count": 4,
+        "source_skipped_count": 1,
+        "source_skipped_items": [
+            {
+                "symbol": "000020",
+                "name": "Bad Data",
+                "market": "KOSPI",
+                "error_type": "ValueError",
+                "error_message": "missing daily candles",
+            }
+        ],
         "universe_build_result": {
             "build_outcome": "DRY_RUN",
         },
